@@ -50,6 +50,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   switch (event.type) {
     /**
      * Customer completed a Payment Link checkout for a subscription
+     * (primary creation path)
      */
     case "checkout.session.completed": {
       const session = event.data.object as Stripe.Checkout.Session
@@ -206,13 +207,169 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     }
 
     /**
+     * Subscription was created (may or may not be via Checkout)
+     * Safety net: if subscription row doesn't exist yet, create it.
+     */
+    case "customer.subscription.created": {
+      const stripeSub = event.data.object as any
+
+      const stripeCustomerId = stripeSub.customer as string | null
+      if (!stripeCustomerId) {
+        console.warn(
+          "[subscriptions] customer.subscription.created missing customer id"
+        )
+        break
+      }
+
+      // 1️⃣ Idempotency: if this subscription already exists, skip
+      {
+        const [existingSub] = await subscriptionModuleService.listSubscriptions({
+          stripe_subscription_id: stripeSub.id,
+        })
+
+        if (existingSub) {
+          console.log(
+            "[subscriptions] customer.subscription.created: subscription already exists, skipping create:",
+            stripeSub.id
+          )
+          break
+        }
+      }
+
+      // 2️⃣ Load Stripe customer for email/name/shipping
+      const stripeCustomer = (await stripe.customers.retrieve(
+        stripeCustomerId
+      )) as any
+
+      const email = stripeCustomer.email as string | null
+      const name = (stripeCustomer.name as string) || ""
+      const shippingDetails = stripeCustomer.shipping || null
+
+      if (!email) {
+        console.warn(
+          "[subscriptions] customer.subscription.created has no email, cannot create Medusa customer"
+        )
+        break
+      }
+
+      // 3️⃣ Find or create Medusa customer by email
+      const [existingCustomer] = await customerModuleService.listCustomers({
+        email,
+      })
+
+      let medusaCustomer = existingCustomer
+
+      if (!medusaCustomer) {
+        const [first_name, ...rest] = name.split(" ")
+        const last_name = rest.join(" ") || null
+
+        medusaCustomer = await customerModuleService.createCustomers({
+          email,
+          first_name: first_name || null,
+          last_name,
+          metadata: {
+            stripe_customer_id: stripeCustomerId,
+          },
+        })
+      } else {
+        const metadata = (medusaCustomer.metadata || {}) as Record<
+          string,
+          unknown
+        >
+        if (!metadata.stripe_customer_id) {
+          await customerModuleService.updateCustomers(
+            { id: medusaCustomer.id },
+            {
+              metadata: {
+                ...metadata,
+                stripe_customer_id: stripeCustomerId,
+              },
+            }
+          )
+        }
+      }
+
+      // 4️⃣ Determine price and map to SubscriptionPlan
+      const firstItem = stripeSub.items?.data?.[0]
+      const priceId = firstItem?.price?.id
+
+      if (!priceId) {
+        console.warn(
+          "[subscriptions] customer.subscription.created: missing price id for subscription",
+          stripeSub.id
+        )
+        break
+      }
+
+      const [plan] = await subscriptionModuleService.listSubscriptionPlans({
+        stripe_price_id: priceId,
+      })
+
+      if (!plan) {
+        console.warn(
+          "[subscriptions] customer.subscription.created: No SubscriptionPlan found for stripe_price_id",
+          priceId
+        )
+        break
+      }
+
+      // 5️⃣ Shipping snapshot from Stripe customer
+      const addr = shippingDetails?.address || null
+
+      const subscription = await subscriptionModuleService.createSubscriptions({
+        customer_id: medusaCustomer.id,
+        plan_id: plan.id,
+        stripe_customer_id: stripeCustomerId,
+        stripe_subscription_id: stripeSub.id,
+        stripe_latest_invoice_id: stripeSub.latest_invoice as string | null,
+        status: stripeSub.status as any,
+        current_period_start: stripeSub.current_period_start
+          ? new Date(stripeSub.current_period_start * 1000)
+          : null,
+        current_period_end: stripeSub.current_period_end
+          ? new Date(stripeSub.current_period_end * 1000)
+          : null,
+
+        billing_email: email,
+
+        shipping_name: shippingDetails?.name || null,
+        shipping_phone: shippingDetails?.phone || null,
+
+        shipping_address_line1: addr?.line1 || null,
+        shipping_address_line2: addr?.line2 || null,
+        shipping_city: addr?.city || null,
+        shipping_province: addr?.state || null,
+        shipping_postal_code: addr?.postal_code || null,
+        shipping_country: addr?.country || null,
+
+        last_order_id: null,
+        last_order_created_at: null,
+      })
+
+      console.log(
+        "[subscriptions] Created subscription from customer.subscription.created",
+        subscription.id,
+        "for customer",
+        medusaCustomer.email,
+        "plan",
+        plan.id
+      )
+
+      break
+    }
+
+    /**
      * Subscription renewed successfully (Stripe charged the customer)
      * We'll update the period & invoice info now, and later plug in order creation.
      */
     case "invoice.payment_succeeded": {
       const invoiceAny = event.data.object as any
 
-      if (invoiceAny.billing_reason !== "subscription_cycle") {
+      // Handle both first charge and renewals
+      if (
+        invoiceAny.billing_reason !== "subscription_cycle" &&
+        invoiceAny.billing_reason !== "subscription_create"
+      ) {
         break
       }
 
