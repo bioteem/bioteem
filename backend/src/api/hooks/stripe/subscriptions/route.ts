@@ -366,12 +366,9 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
      * Subscription renewed (or first charge) successfully
      * -> update subscription + create a Medusa Order
      */
-    case "invoice.payment_succeeded": {
+        case "invoice.payment_succeeded": {
       const invoiceAny = event.data.object as any
 
-      // We care about:
-      // - subscription_create  (first invoice)
-      // - subscription_cycle   (recurring invoices)
       const reason = invoiceAny.billing_reason
       if (
         reason !== "subscription_create" &&
@@ -380,10 +377,29 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         break
       }
 
-      const stripeSubId = invoiceAny.subscription as string | null
+      // 🔍 Try multiple locations for the subscription id
+      let stripeSubId: string | null =
+        (invoiceAny.subscription as string | null) ?? null
+
+      if (!stripeSubId) {
+        const firstLine = invoiceAny.lines?.data?.[0]
+
+        stripeSubId =
+          // older / simpler shape
+          (firstLine?.subscription as string | undefined) ??
+          // new "parent.subscription_item_details.subscription" shape
+          (firstLine?.parent?.subscription_item_details?.subscription as
+            string | undefined) ??
+          null
+      }
+
       if (!stripeSubId) {
         console.warn(
-          "[subscriptions] invoice.payment_succeeded missing subscription id"
+          "[subscriptions] invoice.payment_succeeded missing subscription id",
+          {
+            invoice_id: invoiceAny.id,
+            billing_reason: invoiceAny.billing_reason,
+          }
         )
         break
       }
