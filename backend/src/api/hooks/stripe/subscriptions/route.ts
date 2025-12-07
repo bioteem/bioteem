@@ -5,6 +5,7 @@ import SubscriptionModuleService from "../../../../modules/subscription/service"
 import { SUBSCRIPTION_MODULE } from "../../../../modules/subscription"
 import { Modules } from "@medusajs/framework/utils"
 import type { ICustomerModuleService } from "@medusajs/framework/types"
+
 const stripe = new Stripe(process.env.STRIPE_API_KEY!)
 
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
@@ -38,10 +39,9 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   const subscriptionModuleService =
     req.scope.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
 
-const customerModuleService = req.scope.resolve<ICustomerModuleService>(
-  Modules.CUSTOMER
-)
-  // we’ll use product/order modules later when we start creating orders
+  const customerModuleService = req.scope.resolve<ICustomerModuleService>(
+    Modules.CUSTOMER
+  )
 
   switch (event.type) {
     /**
@@ -65,7 +65,7 @@ const customerModuleService = req.scope.resolve<ICustomerModuleService>(
       }
 
       const customerDetails = session.customer_details
-      const shippingDetails = (session as any).shipping_details // TS: property may not be declared but exists at runtime
+      const shippingDetails = (session as any).shipping_details
 
       const email = customerDetails?.email
       const name = customerDetails?.name || ""
@@ -98,7 +98,10 @@ const customerModuleService = req.scope.resolve<ICustomerModuleService>(
         })
       } else {
         // ensure stripe_customer_id is stored
-        const metadata = medusaCustomer.metadata || {}
+        const metadata = (medusaCustomer.metadata || {}) as Record<
+          string,
+          unknown
+        >
         if (!metadata.stripe_customer_id) {
           await customerModuleService.updateCustomers(
             { id: medusaCustomer.id },
@@ -113,7 +116,9 @@ const customerModuleService = req.scope.resolve<ICustomerModuleService>(
       }
 
       // 2️⃣ Load the Stripe Subscription to get the price (maps to our plan)
-      const stripeSub = await stripe.subscriptions.retrieve(stripeSubId)
+      const stripeSubResp = await stripe.subscriptions.retrieve(stripeSubId)
+      const stripeSub = stripeSubResp as any
+
       const firstItem = stripeSub.items.data[0]
       const priceId = firstItem?.price?.id
 
@@ -201,13 +206,13 @@ const customerModuleService = req.scope.resolve<ICustomerModuleService>(
      * We'll update the period & invoice info now, and later plug in order creation.
      */
     case "invoice.payment_succeeded": {
-      const invoice = event.data.object as Stripe.Invoice
+      const invoiceAny = event.data.object as any
 
-      if (invoice.billing_reason !== "subscription_cycle") {
+      if (invoiceAny.billing_reason !== "subscription_cycle") {
         break
       }
 
-      const stripeSubId = invoice.subscription as string | null
+      const stripeSubId = invoiceAny.subscription as string | null
       if (!stripeSubId) {
         console.warn(
           "[subscriptions] invoice.payment_succeeded missing subscription id"
@@ -228,14 +233,14 @@ const customerModuleService = req.scope.resolve<ICustomerModuleService>(
         break
       }
 
-      const line = invoice.lines.data[0]
+      const line = invoiceAny.lines?.data?.[0]
       const period = line?.period
 
       // 2️⃣ Update latest invoice + period
       await subscriptionModuleService.updateSubscriptions(
         { id: sub.id },
         {
-          stripe_latest_invoice_id: invoice.id,
+          stripe_latest_invoice_id: invoiceAny.id,
           status: "active",
           current_period_start: period
             ? new Date(period.start * 1000)
@@ -250,7 +255,7 @@ const customerModuleService = req.scope.resolve<ICustomerModuleService>(
         "[subscriptions] Updated subscription after invoice.payment_succeeded",
         sub.id,
         "invoice",
-        invoice.id
+        invoiceAny.id
       )
 
       // 3️⃣ Later we’ll create a Medusa Order here using product + customer + address
