@@ -1,8 +1,15 @@
 {
   "extends": "../../tsconfig.json",
+  
   "compilerOptions": {
-    "module": "esnext"
-  },
+    "jsx": "react-jsx",
+    "types": [
+      "vite/client",
+      "react",
+      "react-dom"
+    ]},
+  
+
   "include": ["."],
   "exclude": ["**/*.spec.js"]
 }
