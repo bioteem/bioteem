@@ -102,7 +102,6 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           },
         })
       } else {
-        // ensure stripe_customer_id is stored
         const metadata = (medusaCustomer.metadata || {}) as Record<
           string,
           unknown
@@ -207,8 +206,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     }
 
     /**
-     * Subscription was created (may or may not be via Checkout)
-     * Safety net: if subscription row doesn't exist yet, create it.
+     * Subscription was created (safety net for non-Checkout flows)
      */
     case "customer.subscription.created": {
       const stripeSub = event.data.object as any
@@ -359,14 +357,10 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     }
 
     /**
-     * Subscription renewed successfully (Stripe charged the customer)
-     * We'll update the period & invoice info now, and later plug in order creation.
-     */
-        /**
      * Subscription renewed (or first charge) successfully
      * -> update subscription + create a Medusa Order
      */
-        case "invoice.payment_succeeded": {
+    case "invoice.payment_succeeded": {
       const invoiceAny = event.data.object as any
 
       const reason = invoiceAny.billing_reason
@@ -385,9 +379,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         const firstLine = invoiceAny.lines?.data?.[0]
 
         stripeSubId =
-          // older / simpler shape
           (firstLine?.subscription as string | undefined) ??
-          // new "parent.subscription_item_details.subscription" shape
           (firstLine?.parent?.subscription_item_details?.subscription as
             string | undefined) ??
           null
@@ -417,8 +409,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         break
       }
 
-      // 2️⃣ Idempotency guard:
-      // If we've already processed this invoice and created an order, skip.
+      // 2️⃣ Idempotency guard
       if (
         sub.stripe_latest_invoice_id === invoiceAny.id &&
         sub.last_order_id
@@ -442,15 +433,14 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           "[subscriptions] Subscription has no plan for plan_id",
           sub.plan_id
         )
-        // still update period & invoice below, but no order will be created
       }
 
-      // Stripe line period for current cycle
       const line = invoiceAny.lines?.data?.[0]
       const period = line?.period
 
-      // Decide price + currency:
-      // Prefer plan.unit_amount / plan.currency, fall back to Stripe invoice.
+      // ⚖️ Decide price + currency:
+      // use plan.unit_amount / plan.currency (already in cents),
+      // fall back to Stripe invoice amounts if needed.
       let unitAmount: number | null =
         (plan && typeof plan.unit_amount === "number"
           ? plan.unit_amount
@@ -459,41 +449,76 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         (plan && plan.currency ? plan.currency.toLowerCase() : null)
 
       if (unitAmount == null && typeof invoiceAny.amount_paid === "number") {
-        unitAmount = invoiceAny.amount_paid
+        unitAmount = invoiceAny.amount_paid // also in cents
       }
 
       if (!currency && typeof invoiceAny.currency === "string") {
         currency = invoiceAny.currency.toLowerCase()
       }
 
-      // 4️⃣ Create order if we have enough info (plan + price + currency)
+      // 4️⃣ Create order if we have enough info
       let createdOrder: any | null = null
 
       if (plan && unitAmount != null && currency) {
         try {
           const orderModule = req.scope.resolve<any>(Modules.ORDER)
 
-          // Build a simple order payload.
-          // NOTE: field names may need small tweaks depending on your Order module API.
+          // Load product → variant + sales channel
+          let product: any | null = null
+          let variantId: string | undefined
+          let salesChannelId: string | undefined
+          let lineTitle = plan.name ?? "Subscription"
+
+          try {
+            const productModule = req.scope.resolve<any>(Modules.PRODUCT)
+            product = await productModule.retrieveProduct(plan.product_id)
+
+            if (product?.title) {
+              lineTitle = product.title
+            }
+
+            if (
+              Array.isArray(product?.variants) &&
+              product.variants.length > 0
+            ) {
+              variantId = product.variants[0].id
+            }
+
+            if (
+              Array.isArray(product?.sales_channels) &&
+              product.sales_channels.length > 0
+            ) {
+              salesChannelId = product.sales_channels[0].id
+            }
+          } catch (e) {
+            console.warn(
+              "[subscriptions] Could not load product for plan",
+              plan.id,
+              "product_id",
+              plan.product_id,
+              e
+            )
+          }
+
           const orderInput: any = {
             customer_id: sub.customer_id,
             email: sub.billing_email ?? undefined,
-            currency_code: currency, // common order field name in Medusa v2
+            currency_code: currency,
+            sales_channel_id: salesChannelId,
 
             items: [
               {
-              
-      title: plan.name ?? "Subscription",   // 👈 NEW
-      product_id: plan.product_id,
-      quantity: 1,
-      unit_price: unitAmount,
+                title: lineTitle,
+                product_id: plan.product_id,
+                variant_id: variantId,
+                quantity: 1,
+                unit_price: unitAmount, // cents – same scale as Stripe & Medusa
               },
             ],
 
-            // Shipping snapshot from subscription
             shipping_address: {
               first_name: sub.shipping_name ?? undefined,
-              last_name: undefined, // you can split name later if needed
+              last_name: undefined,
               phone: sub.shipping_phone ?? undefined,
               address_1: sub.shipping_address_line1 ?? undefined,
               address_2: sub.shipping_address_line2 ?? undefined,
@@ -510,13 +535,36 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
               stripe_subscription_id: stripeSubId,
               stripe_invoice_id: invoiceAny.id,
               stripe_customer_id: sub.stripe_customer_id,
+              subscription_plan_name: plan.name,
             },
           }
 
-          // Depending on the Order module API this may return the created order directly
-          // or an array. We'll handle both shapes safely.
-          const result = await orderModule.createOrders(orderInput as any)
+          const result = await orderModule.createOrders(orderInput)
           createdOrder = Array.isArray(result) ? result[0] : result
+
+          // 💳 Mark order as paid in Medusa
+          try {
+            const orderTotal =
+              createdOrder?.total ??
+              createdOrder?.subtotal ??
+              unitAmount
+
+            if (orderTotal != null) {
+              await orderModule.updateOrders(
+                { id: createdOrder.id },
+                {
+                  paid_total: orderTotal,
+                  payment_status: "captured",
+                }
+              )
+            }
+          } catch (markPaidErr) {
+            console.warn(
+              "[subscriptions] Failed to mark order as paid",
+              createdOrder?.id,
+              markPaidErr
+            )
+          }
 
           console.log(
             "[subscriptions] Created order",
