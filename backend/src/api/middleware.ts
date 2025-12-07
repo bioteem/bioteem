@@ -7,7 +7,7 @@ export default defineMiddlewares({
       method: ["POST"],
       matcher: "/hooks/stripe/subscriptions",
       bodyParser: {
-        preserveRawBody: true, // 👈 needed for Stripe signature verification
+        preserveRawBody: true, // 👈 this is what populates req.rawBody
       },
     },
   ],

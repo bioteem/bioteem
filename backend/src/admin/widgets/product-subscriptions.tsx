@@ -83,7 +83,21 @@ const ProductSubscriptionsWidget = ({
       setIntervalCount(1)
     },
   })
-
+  const deletePlanMutation = useMutation({
+    mutationFn: async (planId: string) => {
+      await sdk.client.fetch(
+        `/admin/products/${productId}/subscription-plans/${planId}`,
+        {
+          method: "DELETE",
+        }
+      )
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["subscription-plans", productId],
+      })
+    },
+  })
   const plans = plansData?.subscription_plans ?? []
 
   return (
@@ -115,39 +129,47 @@ const ProductSubscriptionsWidget = ({
         {plans.length > 0 && (
           <div className="space-y-2">
             {plans.map((plan) => (
-              <div
-                key={plan.id}
-                className="flex flex-col gap-y-1 rounded-md border px-3 py-2"
-              >
-                <div className="flex items-center justify-between gap-x-2">
-                  <div className="flex items-center gap-x-2">
-                    <Text className="font-medium">{plan.name}</Text>
-                    {plan.active ? (
-                      <Badge size="small" color="green">
-                        Active
-                      </Badge>
-                    ) : (
-                      <Badge size="small" color="orange">
-                        Inactive
-                      </Badge>
-                    )}
-                  </div>
-                  {plan.interval && plan.interval_count && (
-                    <Text className="text-xs text-ui-fg-subtle">
-                      Every {plan.interval_count} {plan.interval}
-                      {plan.interval_count > 1 ? "s" : ""}
-                    </Text>
-                  )}
-                </div>
-                <Text className="text-xs text-ui-fg-subtle break-all">
-                  <span className="font-medium">Stripe Price:</span>{" "}
-                  {plan.stripe_price_id}
-                </Text>
-                <Text className="text-xs text-ui-fg-subtle break-all">
-                  <span className="font-medium">Payment Link:</span>{" "}
-                  {plan.payment_link_url}
-                </Text>
-              </div>
+  <div
+  key={plan.id}
+  className="flex flex-col gap-y-1 rounded-md border px-3 py-2"
+>
+  <div className="flex items-center justify-between gap-x-2">
+    <div className="flex items-center gap-x-2">
+      <Text className="font-medium">{plan.name}</Text>
+      {plan.active ? (
+        <Badge size="small" color="green">
+          Active
+        </Badge>
+      ) : (
+        <Badge size="small" color="orange">
+          Inactive
+        </Badge>
+      )}
+      {plan.interval && plan.interval_count && (
+        <Text className="text-xs text-ui-fg-subtle">
+          • Every {plan.interval_count} {plan.interval}
+          {plan.interval_count > 1 ? "s" : ""}
+        </Text>
+      )}
+    </div>
+
+    <Button
+      size="small"
+      variant="secondary"
+      onClick={() => deletePlanMutation.mutate(plan.id)}
+      disabled={deletePlanMutation.isPending}
+    >
+      Delete
+    </Button>
+  </div>
+
+  <Text className="text-xs text-ui-fg-subtle break-all">
+    <span className="font-medium">Stripe Price:</span> {plan.stripe_price_id}
+  </Text>
+  <Text className="text-xs text-ui-fg-subtle break-all">
+    <span className="font-medium">Payment Link:</span> {plan.payment_link_url}
+  </Text>
+</div>
             ))}
           </div>
         )}
