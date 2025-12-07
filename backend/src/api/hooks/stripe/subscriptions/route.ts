@@ -19,10 +19,18 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     return res.status(400).send("Missing Stripe signature or webhook secret")
   }
 
-  if (!req.rawBody) {
-    console.error("[subscriptions] Missing rawBody on request")
-    return res.status(400).send("Missing raw body for Stripe webhook")
-  }
+if (!req.rawBody) {
+  console.error("[subscriptions] Missing rawBody on request", {
+    hasBody: !!req.body,
+    rawType: typeof req.rawBody,
+  })
+  return res.status(400).send("Missing raw body for Stripe webhook")
+}
+
+console.log(
+  "[subscriptions] Got rawBody of length",
+  (req.rawBody as Buffer).length
+)
 
   let event: Stripe.Event
 

@@ -83,21 +83,31 @@ const ProductSubscriptionsWidget = ({
       setIntervalCount(1)
     },
   })
-  const deletePlanMutation = useMutation({
-    mutationFn: async (planId: string) => {
-      await sdk.client.fetch(
-        `/admin/products/${productId}/subscription-plans/${planId}`,
-        {
-          method: "DELETE",
+const deletePlanMutation = useMutation({
+  mutationFn: async (planId: string) => {
+    await sdk.client.fetch(
+      `/admin/products/${productId}/subscription-plans/${planId}`,
+      {
+        method: "DELETE",
+      }
+    )
+    return planId
+  },
+  onSuccess: (deletedPlanId) => {
+    // ✅ Optimistically update the cache so UI updates instantly
+    queryClient.setQueryData<PlansResponse | undefined>(
+      ["subscription-plans", productId],
+      (old) => {
+        if (!old) return old
+        return {
+          subscription_plans: old.subscription_plans.filter(
+            (p) => p.id !== deletedPlanId
+          ),
         }
-      )
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({
-        queryKey: ["subscription-plans", productId],
-      })
-    },
-  })
+      }
+    )
+  },
+})
   const plans = plansData?.subscription_plans ?? []
 
   return (
