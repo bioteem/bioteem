@@ -2,6 +2,7 @@
 import { defineRouteConfig } from "@medusajs/admin-sdk"
 import { Container, Heading, Text, Badge } from "@medusajs/ui"
 import { useQuery } from "@tanstack/react-query"
+import {ArrowPath} from "@medusajs/icons"
 import { sdk } from "../../lib/sdk"
 
 type Subscription = {
@@ -140,7 +141,7 @@ const SubscriptionsPage = () => {
 // route config so it appears in sidebar
 export const config = defineRouteConfig({
   label: "Subscriptions",
-  icon: "repeat", // any lucide icon supported by admin, e.g. "repeat"
+  icon: ArrowPath, // any lucide icon supported by admin, e.g. "repeat"
 })
 
 export default SubscriptionsPage

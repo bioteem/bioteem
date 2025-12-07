@@ -6,16 +6,11 @@ import {
   Heading,
   Button,
   Input,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
   Text,
   Badge,
 } from "@medusajs/ui"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
-import { sdk } from "../lib/sdk.js"
+import { sdk } from "../lib/sdk"
 import type {
   DetailWidgetProps,
   AdminProduct,
@@ -36,13 +31,6 @@ type PlansResponse = {
   subscription_plans: SubscriptionPlan[]
 }
 
-const intervals: Array<SubscriptionPlan["interval"]> = [
-  "day",
-  "week",
-  "month",
-  "year",
-]
-
 const ProductSubscriptionsWidget = ({
   data,
 }: DetailWidgetProps<AdminProduct>) => {
@@ -50,7 +38,6 @@ const ProductSubscriptionsWidget = ({
   const productId = product.id
   const queryClient = useQueryClient()
 
-  // --- form state for new plan ---
   const [name, setName] = useState("")
   const [interval, setInterval] =
     useState<SubscriptionPlan["interval"]>("month")
@@ -58,7 +45,6 @@ const ProductSubscriptionsWidget = ({
   const [stripePriceId, setStripePriceId] = useState("")
   const [paymentLinkUrl, setPaymentLinkUrl] = useState("")
 
-  // --- fetch existing plans ---
   const { data: plansData, isLoading, isError } = useQuery({
     queryKey: ["subscription-plans", productId],
     queryFn: async () => {
@@ -87,7 +73,6 @@ const ProductSubscriptionsWidget = ({
       )
     },
     onSuccess: () => {
-      // refetch list
       queryClient.invalidateQueries({
         queryKey: ["subscription-plans", productId],
       })
@@ -114,7 +99,6 @@ const ProductSubscriptionsWidget = ({
           be sent to the Stripe Payment Link for each option.
         </Text>
 
-        {/* existing plans */}
         {isLoading && <Text>Loading subscription plans…</Text>}
         {isError && (
           <Text className="text-ui-fg-error">
@@ -170,7 +154,6 @@ const ProductSubscriptionsWidget = ({
 
         <div className="h-px bg-ui-border-base my-4" />
 
-        {/* create new plan form */}
         <Heading level="h3">Add subscription option</Heading>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -185,23 +168,21 @@ const ProductSubscriptionsWidget = ({
 
           <div className="space-y-1">
             <Text className="text-xs font-medium">Interval</Text>
-            <Select
-              value={interval ?? undefined}
-              onValueChange={(val) =>
-                setInterval(val as SubscriptionPlan["interval"])
+            <select
+              className="border border-ui-border-base rounded px-2 py-1 text-sm bg-ui-bg-field shadow-[0_0_0_1px_rgba(0,0,0,0.02)]"
+              value={interval ?? ""}
+              onChange={(e) =>
+                setInterval(
+                  (e.target.value || null) as SubscriptionPlan["interval"]
+                )
               }
             >
-              <SelectTrigger>
-                <SelectValue placeholder="Select interval" />
-              </SelectTrigger>
-              <SelectContent>
-                {intervals.map((int) => (
-                  <SelectItem key={int} value={int!}>
-                    {int}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              <option value="">Select interval</option>
+              <option value="day">day</option>
+              <option value="week">week</option>
+              <option value="month">month</option>
+              <option value="year">year</option>
+            </select>
           </div>
 
           <div className="space-y-1">
@@ -210,7 +191,9 @@ const ProductSubscriptionsWidget = ({
               type="number"
               min={1}
               value={intervalCount}
-              onChange={(e) => setIntervalCount(Number(e.target.value) || 1)}
+              onChange={(e) =>
+                setIntervalCount(Number(e.target.value) || 1)
+              }
             />
           </div>
 
