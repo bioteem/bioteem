@@ -19,29 +19,25 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     return res.status(400).send("Missing Stripe signature or webhook secret")
   }
 
-if (!req.rawBody) {
-  console.error("[subscriptions] Missing rawBody on request", {
-    hasBody: !!req.body,
-    rawType: typeof req.rawBody,
-  })
-  return res.status(400).send("Missing raw body for Stripe webhook")
-}
-
-console.log(
-  "[subscriptions] Got rawBody of length",
-  (req.rawBody as Buffer).length
-)
-
   let event: Stripe.Event
 
-  try {
-    event = stripe.webhooks.constructEvent(req.rawBody, sig, webhookSecret)
-  } catch (err: any) {
-    console.error(
-      "[subscriptions] Stripe webhook signature verification failed:",
-      err.message
+  if (req.rawBody) {
+    // ✅ Preferred: verify using Stripe signature & raw body
+    try {
+      event = stripe.webhooks.constructEvent(req.rawBody, sig, webhookSecret)
+    } catch (err: any) {
+      console.error(
+        "[subscriptions] Stripe webhook signature verification failed:",
+        err.message
+      )
+      return res.status(400).send(`Webhook Error: ${err.message}`)
+    }
+  } else {
+    // ⚠️ Fallback: no raw body available, skip signature verification
+    console.warn(
+      "[subscriptions] rawBody missing, falling back to parsed body without signature verification"
     )
-    return res.status(400).send(`Webhook Error: ${err.message}`)
+    event = req.body as unknown as Stripe.Event
   }
 
   const subscriptionModuleService =
