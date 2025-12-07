@@ -19,6 +19,8 @@ const SubscriptionPlan = model.define("subscription_plan", {
   payment_link_url: model.text(),   // Stripe Payment Link URL
 
   active: model.boolean().default(true),
+  unit_amount: model.number().nullable(),
+currency: model.text().nullable(),
 })
 
 export default SubscriptionPlan

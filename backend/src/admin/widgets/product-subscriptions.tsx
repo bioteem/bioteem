@@ -18,13 +18,16 @@ import type {
 
 type SubscriptionPlan = {
   id: string
-  product_id: string
   name: string
-  interval: "day" | "week" | "month" | "year" | null
+  interval: string | null
   interval_count: number | null
   stripe_price_id: string
-  payment_link_url: string
+  payment_link_url: string | null
   active: boolean
+
+  // 💰 new
+  unit_amount?: number | null
+  currency?: string | null
 }
 
 type PlansResponse = {
@@ -44,6 +47,8 @@ const ProductSubscriptionsWidget = ({
   const [intervalCount, setIntervalCount] = useState<number>(1)
   const [stripePriceId, setStripePriceId] = useState("")
   const [paymentLinkUrl, setPaymentLinkUrl] = useState("")
+  const [priceAmount, setPriceAmount] = useState("")   // e.g. "29.99"
+const [priceCurrency, setPriceCurrency] = useState("usd")
 
   const { data: plansData, isLoading, isError } = useQuery({
     queryKey: ["subscription-plans", productId],
@@ -68,6 +73,10 @@ const ProductSubscriptionsWidget = ({
             stripe_price_id: stripePriceId,
             payment_link_url: paymentLinkUrl,
             active: true,
+              unit_amount: priceAmount
+    ? Math.round(parseFloat(priceAmount) * 100) // dollars → cents
+    : undefined,
+  currency: priceCurrency || undefined,
           },
         }
       )
@@ -81,6 +90,8 @@ const ProductSubscriptionsWidget = ({
       setPaymentLinkUrl("")
       setInterval("month")
       setIntervalCount(1)
+        setPriceAmount("")
+  setPriceCurrency("usd")
     },
   })
 const deletePlanMutation = useMutation({
@@ -161,6 +172,14 @@ const deletePlanMutation = useMutation({
           {plan.interval_count > 1 ? "s" : ""}
         </Text>
       )}
+
+    {plan.unit_amount != null && plan.currency && (
+      <Text className="text-xs text-ui-fg-subtle">
+        <span className="font-medium">Price:</span>{" "}
+        {(plan.unit_amount / 100).toFixed(2)}{" "}
+        {plan.currency.toUpperCase()}
+      </Text>
+    )}
     </div>
 
     <Button
@@ -247,7 +266,20 @@ const deletePlanMutation = useMutation({
             onChange={(e) => setPaymentLinkUrl(e.target.value)}
           />
         </div>
-
+        <div className="grid grid-cols-2 gap-2">
+  <Input
+    placeholder="e.g. 29.99"
+    type="number"
+    step="0.01"
+    value={priceAmount}
+    onChange={(e) => setPriceAmount(e.target.value)}
+  />
+  <Input
+    placeholder="usd"
+    value={priceCurrency}
+    onChange={(e) => setPriceCurrency(e.target.value)}
+  />
+</div>
         <div className="flex justify-end pt-2">
           <Button
             size="small"
