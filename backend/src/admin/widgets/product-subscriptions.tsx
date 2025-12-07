@@ -1,5 +1,5 @@
 // src/admin/widgets/product-subscriptions.tsx
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { defineWidgetConfig } from "@medusajs/admin-sdk"
 import {
   Container,
@@ -47,8 +47,12 @@ const ProductSubscriptionsWidget = ({
   const [intervalCount, setIntervalCount] = useState<number>(1)
   const [stripePriceId, setStripePriceId] = useState("")
   const [paymentLinkUrl, setPaymentLinkUrl] = useState("")
-  const [priceAmount, setPriceAmount] = useState("")   // e.g. "29.99"
-const [priceCurrency, setPriceCurrency] = useState("usd")
+  const [priceAmount, setPriceAmount] = useState("") // e.g. "29.99"
+  const [priceCurrency, setPriceCurrency] = useState("usd")
+
+  // Local plans state so we can animate/remove instantly
+  const [plans, setPlans] = useState<SubscriptionPlan[]>([])
+  const [deletingId, setDeletingId] = useState<string | null>(null)
 
   const { data: plansData, isLoading, isError } = useQuery({
     queryKey: ["subscription-plans", productId],
@@ -59,6 +63,13 @@ const [priceCurrency, setPriceCurrency] = useState("usd")
       return res
     },
   })
+
+  // Sync local plans when query data changes
+  useEffect(() => {
+    if (plansData?.subscription_plans) {
+      setPlans(plansData.subscription_plans)
+    }
+  }, [plansData])
 
   const createPlanMutation = useMutation({
     mutationFn: async () => {
@@ -73,10 +84,10 @@ const [priceCurrency, setPriceCurrency] = useState("usd")
             stripe_price_id: stripePriceId,
             payment_link_url: paymentLinkUrl,
             active: true,
-              unit_amount: priceAmount
-    ? Math.round(parseFloat(priceAmount) * 100) // dollars → cents
-    : undefined,
-  currency: priceCurrency || undefined,
+            unit_amount: priceAmount
+              ? Math.round(parseFloat(priceAmount) * 100) // dollars → cents
+              : undefined,
+            currency: priceCurrency || undefined,
           },
         }
       )
@@ -90,36 +101,48 @@ const [priceCurrency, setPriceCurrency] = useState("usd")
       setPaymentLinkUrl("")
       setInterval("month")
       setIntervalCount(1)
-        setPriceAmount("")
-  setPriceCurrency("usd")
+      setPriceAmount("")
+      setPriceCurrency("usd")
     },
   })
-const deletePlanMutation = useMutation({
-  mutationFn: async (planId: string) => {
-    await sdk.client.fetch(
-      `/admin/products/${productId}/subscription-plans/${planId}`,
-      {
-        method: "DELETE",
-      }
-    )
-    return planId
-  },
-  onSuccess: (deletedPlanId) => {
-    // ✅ Optimistically update the cache so UI updates instantly
-    queryClient.setQueryData<PlansResponse | undefined>(
-      ["subscription-plans", productId],
-      (old) => {
-        if (!old) return old
-        return {
-          subscription_plans: old.subscription_plans.filter(
-            (p) => p.id !== deletedPlanId
-          ),
+
+  const deletePlanMutation = useMutation({
+    mutationFn: async (planId: string) => {
+      await sdk.client.fetch(
+        `/admin/products/${productId}/subscription-plans/${planId}`,
+        {
+          method: "DELETE",
         }
-      }
-    )
-  },
-})
-  const plans = plansData?.subscription_plans ?? []
+      )
+    },
+    onSuccess: () => {
+      // Just in case, refetch to stay in sync with backend
+      queryClient.invalidateQueries({
+        queryKey: ["subscription-plans", productId],
+      })
+    },
+  })
+
+  const handleDelete = (planId: string) => {
+    // trigger animation
+    setDeletingId(planId)
+
+    // after animation duration, remove from local state & call API
+    setTimeout(() => {
+      setPlans((prev) => prev.filter((p) => p.id !== planId))
+
+      deletePlanMutation.mutate(planId, {
+        onError: () => {
+          // if delete fails, refetch to recover UI
+          queryClient.invalidateQueries({
+            queryKey: ["subscription-plans", productId],
+          })
+        },
+      })
+
+      setDeletingId(null)
+    }, 150) // matches transition duration below
+  }
 
   return (
     <Container className="divide-y p-0">
@@ -150,55 +173,65 @@ const deletePlanMutation = useMutation({
         {plans.length > 0 && (
           <div className="space-y-2">
             {plans.map((plan) => (
-  <div
-  key={plan.id}
-  className="flex flex-col gap-y-1 rounded-md border px-3 py-2"
->
-  <div className="flex items-center justify-between gap-x-2">
-    <div className="flex items-center gap-x-2">
-      <Text className="font-medium">{plan.name}</Text>
-      {plan.active ? (
-        <Badge size="small" color="green">
-          Active
-        </Badge>
-      ) : (
-        <Badge size="small" color="orange">
-          Inactive
-        </Badge>
-      )}
-      {plan.interval && plan.interval_count && (
-        <Text className="text-xs text-ui-fg-subtle">
-          • Every {plan.interval_count} {plan.interval}
-          {plan.interval_count > 1 ? "s" : ""}
-        </Text>
-      )}
+              <div
+                key={plan.id}
+                className={[
+                  "flex flex-col gap-y-1 rounded-md border px-3 py-2",
+                  "transition-all duration-150 ease-out",
+                  deletingId === plan.id
+                    ? "opacity-0 scale-95"
+                    : "opacity-100 scale-100",
+                ].join(" ")}
+              >
+                <div className="flex items-center justify-between gap-x-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Text className="font-medium">{plan.name}</Text>
+                    {plan.active ? (
+                      <Badge size="small" color="green">
+                        Active
+                      </Badge>
+                    ) : (
+                      <Badge size="small" color="orange">
+                        Inactive
+                      </Badge>
+                    )}
+                    {plan.interval && plan.interval_count && (
+                      <Text className="text-xs text-ui-fg-subtle">
+                        • Every {plan.interval_count} {plan.interval}
+                        {plan.interval_count > 1 ? "s" : ""}
+                      </Text>
+                    )}
 
-    {plan.unit_amount != null && plan.currency && (
-      <Text className="text-xs text-ui-fg-subtle">
-        <span className="font-medium">Price:</span>{" "}
-        {(plan.unit_amount / 100).toFixed(2)}{" "}
-        {plan.currency.toUpperCase()}
-      </Text>
-    )}
-    </div>
+                    {plan.unit_amount != null && plan.currency && (
+                      <Text className="text-xs text-ui-fg-subtle">
+                        <span className="font-medium">Price:</span>{" "}
+                        {(plan.unit_amount / 100).toFixed(2)}{" "}
+                        {plan.currency.toUpperCase()}
+                      </Text>
+                    )}
+                  </div>
 
-    <Button
-      size="small"
-      variant="secondary"
-      onClick={() => deletePlanMutation.mutate(plan.id)}
-      disabled={deletePlanMutation.isPending}
-    >
-      Delete
-    </Button>
-  </div>
+                  <Button
+                    size="small"
+                    variant="secondary"
+                    onClick={() => handleDelete(plan.id)}
+                    disabled={
+                      deletePlanMutation.isPending && deletingId === plan.id
+                    }
+                  >
+                    Delete
+                  </Button>
+                </div>
 
-  <Text className="text-xs text-ui-fg-subtle break-all">
-    <span className="font-medium">Stripe Price:</span> {plan.stripe_price_id}
-  </Text>
-  <Text className="text-xs text-ui-fg-subtle break-all">
-    <span className="font-medium">Payment Link:</span> {plan.payment_link_url}
-  </Text>
-</div>
+                <Text className="text-xs text-ui-fg-subtle break-all">
+                  <span className="font-medium">Stripe Price:</span>{" "}
+                  {plan.stripe_price_id}
+                </Text>
+                <Text className="text-xs text-ui-fg-subtle break-all">
+                  <span className="font-medium">Payment Link:</span>{" "}
+                  {plan.payment_link_url}
+                </Text>
+              </div>
             ))}
           </div>
         )}
@@ -266,20 +299,22 @@ const deletePlanMutation = useMutation({
             onChange={(e) => setPaymentLinkUrl(e.target.value)}
           />
         </div>
+
         <div className="grid grid-cols-2 gap-2">
-  <Input
-    placeholder="e.g. 29.99"
-    type="number"
-    step="0.01"
-    value={priceAmount}
-    onChange={(e) => setPriceAmount(e.target.value)}
-  />
-  <Input
-    placeholder="usd"
-    value={priceCurrency}
-    onChange={(e) => setPriceCurrency(e.target.value)}
-  />
-</div>
+          <Input
+            placeholder="e.g. 29.99"
+            type="number"
+            step="0.01"
+            value={priceAmount}
+            onChange={(e) => setPriceAmount(e.target.value)}
+          />
+          <Input
+            placeholder="usd"
+            value={priceCurrency}
+            onChange={(e) => setPriceCurrency(e.target.value)}
+          />
+        </div>
+
         <div className="flex justify-end pt-2">
           <Button
             size="small"
