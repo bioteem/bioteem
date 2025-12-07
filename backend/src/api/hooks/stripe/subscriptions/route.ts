@@ -482,10 +482,11 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
 
             items: [
               {
-                // link to the product from the plan
-                product_id: plan.product_id,
-                quantity: 1,
-                unit_price: unitAmount,
+              
+      title: plan.name ?? "Subscription",   // 👈 NEW
+      product_id: plan.product_id,
+      quantity: 1,
+      unit_price: unitAmount,
               },
             ],
 
