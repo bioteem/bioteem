@@ -362,13 +362,20 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
      * Subscription renewed successfully (Stripe charged the customer)
      * We'll update the period & invoice info now, and later plug in order creation.
      */
+        /**
+     * Subscription renewed (or first charge) successfully
+     * -> update subscription + create a Medusa Order
+     */
     case "invoice.payment_succeeded": {
       const invoiceAny = event.data.object as any
 
-      // Handle both first charge and renewals
+      // We care about:
+      // - subscription_create  (first invoice)
+      // - subscription_cycle   (recurring invoices)
+      const reason = invoiceAny.billing_reason
       if (
-        invoiceAny.billing_reason !== "subscription_cycle" &&
-        invoiceAny.billing_reason !== "subscription_create"
+        reason !== "subscription_create" &&
+        reason !== "subscription_cycle"
       ) {
         break
       }
@@ -381,7 +388,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         break
       }
 
-      // 1️⃣ Find our subscription row
+      // 1️⃣ Find our local subscription row
       const [sub] = await subscriptionModuleService.listSubscriptions({
         stripe_subscription_id: stripeSubId,
       })
@@ -394,10 +401,137 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         break
       }
 
+      // 2️⃣ Idempotency guard:
+      // If we've already processed this invoice and created an order, skip.
+      if (
+        sub.stripe_latest_invoice_id === invoiceAny.id &&
+        sub.last_order_id
+      ) {
+        console.log(
+          "[subscriptions] Invoice already processed for subscription",
+          sub.id,
+          "invoice",
+          invoiceAny.id
+        )
+        break
+      }
+
+      // 3️⃣ Load the plan (gives us product + price)
+      const [plan] = await subscriptionModuleService.listSubscriptionPlans({
+        id: sub.plan_id,
+      })
+
+      if (!plan) {
+        console.warn(
+          "[subscriptions] Subscription has no plan for plan_id",
+          sub.plan_id
+        )
+        // still update period & invoice below, but no order will be created
+      }
+
+      // Stripe line period for current cycle
       const line = invoiceAny.lines?.data?.[0]
       const period = line?.period
 
-      // 2️⃣ Update latest invoice + period
+      // Decide price + currency:
+      // Prefer plan.unit_amount / plan.currency, fall back to Stripe invoice.
+      let unitAmount: number | null =
+        (plan && typeof plan.unit_amount === "number"
+          ? plan.unit_amount
+          : null)
+      let currency: string | null =
+        (plan && plan.currency ? plan.currency.toLowerCase() : null)
+
+      if (unitAmount == null && typeof invoiceAny.amount_paid === "number") {
+        unitAmount = invoiceAny.amount_paid
+      }
+
+      if (!currency && typeof invoiceAny.currency === "string") {
+        currency = invoiceAny.currency.toLowerCase()
+      }
+
+      // 4️⃣ Create order if we have enough info (plan + price + currency)
+      let createdOrder: any | null = null
+
+      if (plan && unitAmount != null && currency) {
+        try {
+          const orderModule = req.scope.resolve<any>(Modules.ORDER)
+
+          // Build a simple order payload.
+          // NOTE: field names may need small tweaks depending on your Order module API.
+          const orderInput: any = {
+            customer_id: sub.customer_id,
+            email: sub.billing_email ?? undefined,
+            currency_code: currency, // common order field name in Medusa v2
+
+            items: [
+              {
+                // link to the product from the plan
+                product_id: plan.product_id,
+                quantity: 1,
+                unit_price: unitAmount,
+              },
+            ],
+
+            // Shipping snapshot from subscription
+            shipping_address: {
+              first_name: sub.shipping_name ?? undefined,
+              last_name: undefined, // you can split name later if needed
+              phone: sub.shipping_phone ?? undefined,
+              address_1: sub.shipping_address_line1 ?? undefined,
+              address_2: sub.shipping_address_line2 ?? undefined,
+              city: sub.shipping_city ?? undefined,
+              province: sub.shipping_province ?? undefined,
+              postal_code: sub.shipping_postal_code ?? undefined,
+              country_code: sub.shipping_country
+                ? sub.shipping_country.toLowerCase()
+                : undefined,
+            },
+
+            metadata: {
+              subscription_id: sub.id,
+              stripe_subscription_id: stripeSubId,
+              stripe_invoice_id: invoiceAny.id,
+              stripe_customer_id: sub.stripe_customer_id,
+            },
+          }
+
+          // Depending on the Order module API this may return the created order directly
+          // or an array. We'll handle both shapes safely.
+          const result = await orderModule.createOrders(orderInput as any)
+          createdOrder = Array.isArray(result) ? result[0] : result
+
+          console.log(
+            "[subscriptions] Created order",
+            createdOrder?.id,
+            "for subscription",
+            sub.id,
+            "invoice",
+            invoiceAny.id
+          )
+        } catch (err) {
+          console.error(
+            "[subscriptions] Failed to create order from subscription",
+            sub.id,
+            "invoice",
+            invoiceAny.id,
+            err
+          )
+        }
+      } else {
+        console.warn(
+          "[subscriptions] Skipping order creation - missing plan/price/currency",
+          {
+            hasPlan: !!plan,
+            unitAmount,
+            currency,
+            subscription_id: sub.id,
+            invoice_id: invoiceAny.id,
+          }
+        )
+      }
+
+      // 5️⃣ Update subscription invoice + period + last order if created
       await subscriptionModuleService.updateSubscriptions(
         { id: sub.id },
         {
@@ -409,17 +543,12 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           current_period_end: period
             ? new Date(period.end * 1000)
             : sub.current_period_end,
+          last_order_id: createdOrder?.id ?? sub.last_order_id,
+          last_order_created_at: createdOrder
+            ? new Date()
+            : sub.last_order_created_at,
         }
       )
-
-      console.log(
-        "[subscriptions] Updated subscription after invoice.payment_succeeded",
-        sub.id,
-        "invoice",
-        invoiceAny.id
-      )
-
-      // 3️⃣ Later we’ll create a Medusa Order here using product + customer + address
 
       break
     }
