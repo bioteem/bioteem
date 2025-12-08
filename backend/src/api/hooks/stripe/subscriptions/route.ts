@@ -8,13 +8,9 @@ import type { ICustomerModuleService } from "@medusajs/framework/types"
 
 const stripe = new Stripe(process.env.STRIPE_API_KEY!)
 
-// Optional hard-coded sales channel fallback
-const SUBSCRIPTIONS_SALES_CHANNEL_ID =
-  process.env.SUBSCRIPTIONS_SALES_CHANNEL_ID || undefined
-
-// Optional hard-coded region for all subscription orders
-const SUBSCRIPTIONS_REGION_ID =
-  process.env.SUBSCRIPTIONS_REGION_ID || undefined
+// Fallback configurations
+const SUBSCRIPTIONS_SALES_CHANNEL_ID = process.env.SUBSCRIPTIONS_SALES_CHANNEL_ID
+const SUBSCRIPTIONS_REGION_ID = process.env.SUBSCRIPTIONS_REGION_ID
 
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   const sig = req.headers["stripe-signature"] as string | undefined
@@ -30,7 +26,6 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   let event: Stripe.Event
 
   if (req.rawBody) {
-    // ✅ Preferred: verify using Stripe signature & raw body
     try {
       event = stripe.webhooks.constructEvent(req.rawBody, sig, webhookSecret)
     } catch (err: any) {
@@ -41,7 +36,6 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       return res.status(400).send(`Webhook Error: ${err.message}`)
     }
   } else {
-    // ⚠️ Fallback: no raw body available, skip signature verification
     console.warn(
       "[subscriptions] rawBody missing, falling back to parsed body without signature verification"
     )
@@ -58,7 +52,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   switch (event.type) {
     /**
      * Customer completed a Payment Link checkout for a subscription
-     * (primary creation path)
+     * (primary creation path for our local Subscription row)
      */
     case "checkout.session.completed": {
       const session = event.data.object as Stripe.Checkout.Session
@@ -137,7 +131,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         }
       }
 
-      // 2️⃣ Load the Stripe Subscription to get the price (maps to our plan)
+      // 2️⃣ Load the Stripe Subscription (for price → plan mapping)
       const stripeSubResp = await stripe.subscriptions.retrieve(stripeSubId)
       const stripeSub = stripeSubResp as any
 
@@ -405,8 +399,9 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     }
 
     /**
-     * Subscription renewed (or first charge) successfully
-     * -> update subscription + create a Medusa Order (directly on Order module)
+     * Subscription invoice paid -> match to our Subscription, then:
+     *   Subscription → Plan → Product → Order
+     * All price/currency comes from the SubscriptionPlan, not Stripe invoice.
      */
     case "invoice.payment_succeeded": {
       const invoiceAny = event.data.object as any
@@ -419,13 +414,12 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         break
       }
 
-      // 🔍 subscription id can live in a few places
+      // 🔍 subscription id can live in a few places (Stripe keeps changing shapes)
       let stripeSubId: string | null =
         (invoiceAny.subscription as string | null) ?? null
 
       if (!stripeSubId) {
         const firstLine = invoiceAny.lines?.data?.[0]
-
         stripeSubId =
           (firstLine?.subscription as string | undefined) ??
           (firstLine?.parent?.subscription_item_details?.subscription as
@@ -458,10 +452,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       }
 
       // 2️⃣ Idempotency guard
-      if (
-        sub.stripe_latest_invoice_id === invoiceAny.id &&
-        sub.last_order_id
-      ) {
+      if (sub.stripe_latest_invoice_id === invoiceAny.id && sub.last_order_id) {
         console.log(
           "[subscriptions] Invoice already processed for subscription",
           sub.id,
@@ -471,7 +462,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         break
       }
 
-      // 3️⃣ Load the plan (gives us product + stored price info)
+      // 3️⃣ Load the plan (this is our source of truth for price & product)
       const [plan] = await subscriptionModuleService.listSubscriptionPlans({
         id: sub.plan_id,
       })
@@ -481,252 +472,309 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           "[subscriptions] Subscription has no plan for plan_id",
           sub.plan_id
         )
-      } else {
-        console.log("[subscriptions] invoice.payment_succeeded plan info", {
-          plan_id: plan.id,
-          product_id: plan.product_id,
-          unit_amount: (plan as any).unit_amount,
-          currency: (plan as any).currency,
-        })
+        break
       }
+
+      console.log("[subscriptions] invoice.payment_succeeded plan info", {
+        plan_id: plan.id,
+        product_id: plan.product_id,
+        unit_amount: (plan as any).unit_amount,
+        currency: (plan as any).currency,
+      })
 
       const line = invoiceAny.lines?.data?.[0]
       const period = line?.period
 
-      // ⚖️ Price & currency in cents
-      let unitAmount: number | null =
-        plan && typeof (plan as any).unit_amount === "number"
-          ? (plan as any).unit_amount
-          : null
-      let currency: string | null =
-        plan && (plan as any).currency
-          ? (plan as any).currency.toLowerCase()
-          : null
+      // ⚖️ Price & currency: STRICTLY from plan
+      const unitAmountRaw = (plan as any).unit_amount
+      const currencyRaw = (plan as any).currency
 
-      if (unitAmount == null && typeof invoiceAny.amount_paid === "number") {
-        unitAmount = invoiceAny.amount_paid // Stripe already sends cents
+      if (
+        typeof unitAmountRaw !== "number" ||
+        !Number.isFinite(unitAmountRaw)
+      ) {
+        console.warn(
+          "[subscriptions] Plan has no valid unit_amount, cannot create order",
+          {
+            plan_id: plan.id,
+            unit_amount: unitAmountRaw,
+          }
+        )
+        break
       }
 
-      if (!currency && typeof invoiceAny.currency === "string") {
-        currency = invoiceAny.currency.toLowerCase()
+      if (!currencyRaw || typeof currencyRaw !== "string") {
+        console.warn(
+          "[subscriptions] Plan has no currency, cannot create order",
+          {
+            plan_id: plan.id,
+            currency: currencyRaw,
+          }
+        )
+        break
       }
+
+      const unitAmount: number = unitAmountRaw // cents
+      const currency: string = currencyRaw.toLowerCase()
 
       let createdOrder: any | null = null
 
-      if (plan && unitAmount != null && currency) {
+      try {
+        const orderModule = req.scope.resolve<any>(Modules.ORDER)
+        const productModule = req.scope.resolve<any>(Modules.PRODUCT)
+        const regionModule = req.scope.resolve<any>(Modules.REGION)
+
+        // 🔍 Step 1: Load the product with relations
+        let product: any | null = null
+        let variantId: string | undefined
+        let salesChannelId: string | undefined
+        let regionId: string | undefined
+        let lineTitle = plan.name ?? "Subscription"
+
         try {
-          const orderModule = req.scope.resolve<any>(Modules.ORDER)
-          const productModule = req.scope.resolve<any>(Modules.PRODUCT)
+          product = await productModule.retrieveProduct(plan.product_id, {
+            relations: ["variants", "sales_channels"],
+          })
 
-          let product: any | null = null
-          let productId: string | undefined
-          let variantId: string | undefined
-          let salesChannelId: string | undefined
-          let lineTitle = plan.name ?? "Subscription"
+          console.log("[subscriptions] Loaded product for plan", {
+            product_id: plan.product_id,
+            title: product?.title,
+            variants_count: Array.isArray(product?.variants)
+              ? product.variants.length
+              : "n/a",
+            sales_channels: Array.isArray(product?.sales_channels)
+              ? product.sales_channels.map((sc: any) => sc.id)
+              : "n/a",
+          })
 
+          if (product?.title) {
+            lineTitle = product.title
+          }
+
+          // Get first available variant
+          if (
+            Array.isArray(product?.variants) &&
+            product.variants.length > 0
+          ) {
+            variantId = product.variants[0].id
+          } else {
+            console.warn(
+              "[subscriptions] Product has no variants",
+              plan.product_id
+            )
+          }
+
+          // Get first sales channel
+          if (
+            Array.isArray(product?.sales_channels) &&
+            product.sales_channels.length > 0
+          ) {
+            salesChannelId = product.sales_channels[0].id
+          }
+        } catch (e) {
+          console.warn(
+            "[subscriptions] Could not load product for plan",
+            plan.id,
+            "product_id",
+            plan.product_id,
+            e
+          )
+        }
+
+        // 🔍 Step 2: Determine sales channel (with fallback)
+        if (!salesChannelId && SUBSCRIPTIONS_SALES_CHANNEL_ID) {
+          salesChannelId = SUBSCRIPTIONS_SALES_CHANNEL_ID
+          console.log(
+            "[subscriptions] Using fallback sales channel",
+            salesChannelId
+          )
+        }
+
+        // 🔍 Step 3: Determine region based on country code
+        const countryCode = sub.shipping_country?.toLowerCase()
+
+        if (countryCode) {
           try {
-            // 🔍 Load the actual product that the plan belongs to
-            product = await productModule.retrieveProduct(plan.product_id)
-
-            productId = product?.id
-
-            console.log("[subscriptions] Loaded product for plan", {
-              plan_id: plan.id,
-              plan_product_id: plan.product_id,
-              productId,
-              title: product?.title,
-              variants_count: Array.isArray(product?.variants)
-                ? product.variants.length
-                : "n/a",
-              sales_channels: Array.isArray(product?.sales_channels)
-                ? product.sales_channels.map((sc: any) => sc.id)
-                : "n/a",
+            const regions = await regionModule.listRegions({
+              countries: { iso_2: countryCode },
             })
 
-            if (product?.title) {
-              lineTitle = product.title
-            }
-
-            if (
-              Array.isArray(product?.variants) &&
-              product.variants.length > 0
-            ) {
-              variantId = product.variants[0].id
-            } else {
-              console.warn(
-                "[subscriptions] Product has no variants, variant_id will be undefined",
-                productId
+            if (regions && regions.length > 0) {
+              regionId = regions[0].id
+              console.log(
+                "[subscriptions] Found region for country",
+                countryCode,
+                "->",
+                regionId
               )
-            }
-
-            if (
-              Array.isArray(product?.sales_channels) &&
-              product.sales_channels.length > 0
-            ) {
-              salesChannelId = product.sales_channels[0].id
             }
           } catch (e) {
             console.warn(
-              "[subscriptions] Could not load product for plan",
-              plan.id,
-              "product_id",
-              plan.product_id,
+              "[subscriptions] Failed to find region for country",
+              countryCode,
               e
             )
           }
+        }
 
-          // Fallback to hard-coded sales channel if needed
-          if (!salesChannelId && SUBSCRIPTIONS_SALES_CHANNEL_ID) {
-            salesChannelId = SUBSCRIPTIONS_SALES_CHANNEL_ID
-            console.log(
-              "[subscriptions] Using hard-coded sales channel for subscription order",
-              salesChannelId
-            )
-          }
-
-          // ✅ Region selection for the order
-          let regionId: string | undefined = undefined
+        // Fallback to env or first region
+        if (!regionId) {
           if (SUBSCRIPTIONS_REGION_ID) {
             regionId = SUBSCRIPTIONS_REGION_ID
+            console.log("[subscriptions] Using fallback region", regionId)
+          } else {
+            try {
+              const allRegions = await regionModule.listRegions({ take: 1 })
+              if (allRegions && allRegions.length > 0) {
+                regionId = allRegions[0].id
+                console.log(
+                  "[subscriptions] Using first available region",
+                  regionId
+                )
+              }
+            } catch (e) {
+              console.warn("[subscriptions] Could not load any regions", e)
+            }
+          }
+        }
+
+        if (!regionId) {
+          throw new Error(
+            "No region found - set SUBSCRIPTIONS_REGION_ID or ensure country matches a region"
+          )
+        }
+
+        if (!salesChannelId) {
+          throw new Error(
+            "No sales channel found - set SUBSCRIPTIONS_SALES_CHANNEL_ID or link product to a sales channel"
+          )
+        }
+
+        // 🔍 Step 4: Validate country code format (must be 2-letter ISO)
+        let validCountryCode = countryCode
+        if (countryCode && countryCode.length !== 2) {
+          console.warn(
+            "[subscriptions] Invalid country code format",
+            countryCode,
+            "- defaulting to 'us'"
+          )
+          validCountryCode = "us"
+        }
+
+        console.log("[subscriptions] Building orderInput", {
+          customer_id: sub.customer_id,
+          email: sub.billing_email,
+          currency,
+          region_id: regionId,
+          sales_channel_id: salesChannelId,
+          product_id: plan.product_id,
+          variant_id: variantId,
+          unit_price: unitAmount,
+          country_code: validCountryCode,
+        })
+
+        // 🔍 Step 5: Build order input using Subscription + Plan (NOT Stripe invoice amounts)
+        const orderInput: any = {
+          customer_id: sub.customer_id,
+          email: sub.billing_email ?? undefined,
+          currency_code: currency,
+          region_id: regionId,
+          sales_channel_id: salesChannelId,
+
+          items: [
+            {
+              title: lineTitle,
+              product_id: plan.product_id,
+              variant_id: variantId,
+              quantity: 1,
+              unit_price: unitAmount, // cents from plan.unit_amount
+            },
+          ],
+
+          shipping_address: {
+            first_name: sub.shipping_name ?? "Subscriber",
+            last_name: undefined,
+            phone: sub.shipping_phone ?? undefined,
+            address_1: sub.shipping_address_line1 ?? undefined,
+            address_2: sub.shipping_address_line2 ?? undefined,
+            city: sub.shipping_city ?? undefined,
+            province: sub.shipping_province ?? undefined,
+            postal_code: sub.shipping_postal_code ?? undefined,
+            country_code: validCountryCode ?? "us",
+          },
+
+          metadata: {
+            subscription_id: sub.id,
+            stripe_subscription_id: stripeSubId,
+            stripe_invoice_id: invoiceAny.id,
+            stripe_customer_id: sub.stripe_customer_id,
+            subscription_plan_name: plan.name,
+          },
+        }
+
+        console.log(
+          "[subscriptions] Final orderInput payload",
+          JSON.stringify(orderInput, null, 2)
+        )
+
+        const result = await orderModule.createOrders(orderInput as any)
+        createdOrder = Array.isArray(result) ? result[0] : result
+
+        console.log(
+          "[subscriptions] Created order",
+          createdOrder?.id,
+          "for subscription",
+          sub.id,
+          "invoice",
+          invoiceAny.id
+        )
+
+        // 💳 Mark order as paid (still using our plan-based total)
+        try {
+          const orderTotal =
+            createdOrder?.total ?? createdOrder?.subtotal ?? unitAmount
+
+          if (orderTotal != null && createdOrder?.id) {
+            await orderModule.updateOrders(
+              { id: createdOrder.id },
+              {
+                paid_total: orderTotal,
+                payment_status: "captured",
+              }
+            )
             console.log(
-              "[subscriptions] Using hard-coded region for subscription order",
-              regionId
+              "[subscriptions] Marked order as paid",
+              createdOrder.id,
+              "paid_total",
+              orderTotal
             )
           } else {
             console.warn(
-              "[subscriptions] No SUBSCRIPTIONS_REGION_ID set – order will have no region_id"
-            )
-          }
-
-          console.log("[subscriptions] Building orderInput", {
-            customer_id: sub.customer_id,
-            email: sub.billing_email,
-            currency,
-            region_id: regionId,
-            sales_channel_id: salesChannelId,
-            product_id: productId,
-            variant_id: variantId,
-            unit_price: unitAmount,
-          })
-
-          const orderInput: any = {
-            customer_id: sub.customer_id,
-            email: sub.billing_email ?? undefined,
-            currency_code: currency,
-            sales_channel_id: salesChannelId,
-            region_id: regionId,
-
-            items: [
+              "[subscriptions] Could not mark order as paid – missing total or id",
               {
-                title: lineTitle,
-                // ✅ attach to actual catalog product & variant
-                product_id: productId,
-                variant_id: variantId,
-                quantity: 1,
-                unit_price: unitAmount, // cents – matches Stripe & Medusa internals
-              },
-            ],
-
-            shipping_address: {
-              first_name: sub.shipping_name ?? undefined,
-              last_name: undefined,
-              phone: sub.shipping_phone ?? undefined,
-              address_1: sub.shipping_address_line1 ?? undefined,
-              address_2: sub.shipping_address_line2 ?? undefined,
-              city: sub.shipping_city ?? undefined,
-              province: sub.shipping_province ?? undefined,
-              postal_code: sub.shipping_postal_code ?? undefined,
-              country_code: sub.shipping_country
-                ? sub.shipping_country.toLowerCase()
-                : undefined,
-            },
-
-            metadata: {
-              subscription_id: sub.id,
-              stripe_subscription_id: stripeSubId,
-              stripe_invoice_id: invoiceAny.id,
-              stripe_customer_id: sub.stripe_customer_id,
-              subscription_plan_name: plan.name,
-            },
-          }
-
-          console.log(
-            "[subscriptions] Final orderInput payload",
-            JSON.stringify(orderInput, null, 2)
-          )
-
-          const result = await orderModule.createOrders(orderInput as any)
-          createdOrder = Array.isArray(result) ? result[0] : result
-
-          console.log(
-            "[subscriptions] Created order",
-            createdOrder?.id,
-            "for subscription",
-            sub.id,
-            "invoice",
-            invoiceAny.id
-          )
-
-          // 💳 Mark order as paid in Medusa
-          try {
-            const orderTotal =
-              createdOrder?.total ??
-              createdOrder?.subtotal ??
-              unitAmount
-
-            if (orderTotal != null && createdOrder?.id) {
-              await orderModule.updateOrders(
-                { id: createdOrder.id },
-                {
-                  paid_total: orderTotal,
-                  payment_status: "captured",
-                }
-              )
-              console.log(
-                "[subscriptions] Marked order as paid",
-                createdOrder.id,
-                "paid_total",
-                orderTotal
-              )
-            } else {
-              console.warn(
-                "[subscriptions] Could not mark order as paid – missing total or id",
-                {
-                  order_id: createdOrder?.id,
-                  order_total: orderTotal,
-                }
-              )
-            }
-          } catch (markPaidErr) {
-            console.warn(
-              "[subscriptions] Failed to mark order as paid",
-              createdOrder?.id,
-              markPaidErr
+                order_id: createdOrder?.id,
+                order_total: orderTotal,
+              }
             )
           }
-        } catch (err) {
-          console.error(
-            "[subscriptions] Failed to create order from subscription",
-            sub.id,
-            "invoice",
-            invoiceAny.id,
-            err
+        } catch (markPaidErr) {
+          console.warn(
+            "[subscriptions] Failed to mark order as paid",
+            createdOrder?.id,
+            markPaidErr
           )
         }
-      } else {
-        console.warn(
-          "[subscriptions] Skipping order creation - missing plan/price/currency",
-          {
-            hasPlan: !!plan,
-            unitAmount,
-            currency,
-            subscription_id: sub.id,
-            invoice_id: invoiceAny.id,
-          }
+      } catch (err) {
+        console.error(
+          "[subscriptions] Failed to create order from subscription",
+          sub.id,
+          "invoice",
+          invoiceAny.id,
+          err
         )
       }
 
-      // 5️⃣ Update subscription invoice + period + last order if created
+      // 6️⃣ Update subscription invoice + period + last order if created
       await subscriptionModuleService.updateSubscriptions(
         { id: sub.id },
         {
@@ -749,7 +797,6 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     }
 
     default: {
-      // ignore other events for now
       break
     }
   }
