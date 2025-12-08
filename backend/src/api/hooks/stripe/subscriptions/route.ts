@@ -448,29 +448,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       const line = invoiceAny.lines?.data?.[0]
       const period = line?.period
 
-      //
-      // PRICE: use Stripe’s line price (cents) → convert to Medusa major units
-      //
-      let stripeUnitAmountCents: number | null =
-        line?.price?.unit_amount ?? null
-
-      if (stripeUnitAmountCents == null && typeof invoiceAny.amount_paid === "number") {
-        const qty = line?.quantity ?? 1
-        stripeUnitAmountCents = Math.round(invoiceAny.amount_paid / qty)
-      }
-
-      if (stripeUnitAmountCents == null) {
-        console.warn(
-          "[subscriptions] Could not determine Stripe unit amount for invoice",
-          invoiceAny.id
-        )
-        break
-      }
-
-      // 🧮 Medusa order amounts appear to be in MAJOR units → divide by 100
-      const unitPrice = Math.round(stripeUnitAmountCents / 100)
       const currency = (invoiceAny.currency as string).toLowerCase()
-
       let createdOrder: any | null = null
 
       try {
@@ -478,18 +456,20 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         const productModule = req.scope.resolve<any>(Modules.PRODUCT)
         const regionModule = req.scope.resolve<any>(Modules.REGION)
 
-        // 1) Load product with variants + sales channels
+        // 1) Load product with variants + prices + sales channels
         let product: any | null = null
         let variantId: string | undefined
         let salesChannelId: string | undefined
         let regionId: string | undefined
         let lineTitle = "Subscription order"
+        let unitPrice: number
 
         product = await productModule.retrieveProduct(plan.product_id, {
-          relations: ["variants", "sales_channels"],
+          relations: ["variants", "variants.prices", "sales_channels"],
         })
 
         console.log("[subscriptions] Loaded product for plan", {
+          plan_id: plan.id,
           product_id: plan.product_id,
           title: product?.title,
           variants_count: Array.isArray(product?.variants)
@@ -504,13 +484,41 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           lineTitle = product.title
         }
 
+        // Choose variant + price from Medusa (NOT Stripe)
         if (Array.isArray(product?.variants) && product.variants.length > 0) {
-          variantId = product.variants[0].id
+          const variant = product.variants[0] // adjust if you want specific variant per plan
+          variantId = variant.id
+
+          const prices = (variant as any).prices || []
+          const variantPrice =
+            prices.find((p: any) => p.currency_code === currency) ?? prices[0]
+
+          if (!variantPrice) {
+            throw new Error(
+              `No price found for variant ${variantId} in currency ${currency}`
+            )
+          }
+
+          // Medusa expects minor units (e.g. cents)
+          unitPrice = variantPrice.amount
+
+          console.log("[subscriptions] Using Medusa variant price", {
+            variant_id: variantId,
+            currency,
+            unit_price: unitPrice,
+          })
         } else {
           throw new Error(
             `Product ${plan.product_id} has no variants – cannot create order`
           )
         }
+
+        // Optional: log Stripe price for debugging only
+        const stripeUnitAmountCents = line?.price?.unit_amount ?? null
+        console.log("[subscriptions] Stripe vs Medusa price debug", {
+          stripeUnitAmountCents,
+          medusaUnitPrice: unitPrice,
+        })
 
         if (
           Array.isArray(product?.sales_channels) &&
@@ -607,7 +615,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
               product_id: plan.product_id,
               variant_id: variantId,
               quantity: 1,
-              unit_price: unitPrice, // ✅ major units, not cents
+              unit_price: unitPrice, // Medusa variant price (minor units)
             },
           ],
 
