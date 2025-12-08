@@ -28,7 +28,6 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   let event: Stripe.Event
 
   if (req.rawBody) {
-    // Preferred: verify signature using raw body
     try {
       event = stripe.webhooks.constructEvent(req.rawBody, sig, webhookSecret)
     } catch (err: any) {
@@ -39,7 +38,6 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       return res.status(400).send(`Webhook Error: ${err.message}`)
     }
   } else {
-    // Fallback: no raw body, skip signature verification
     console.warn(
       "[subscriptions] rawBody missing, falling back to parsed body without signature verification"
     )
@@ -448,7 +446,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       const line = invoiceAny.lines?.data?.[0]
       const period = line?.period
 
-      const currency = (invoiceAny.currency as string).toLowerCase()
+      let currency = (invoiceAny.currency as string).toLowerCase()
       let createdOrder: any | null = null
 
       try {
@@ -456,7 +454,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         const productModule = req.scope.resolve<any>(Modules.PRODUCT)
         const regionModule = req.scope.resolve<any>(Modules.REGION)
 
-        // 1) Load product with variants + prices + sales channels
+        // 1) Load product with variants + prices (no sales_channels relation!)
         let product: any | null = null
         let variantId: string | undefined
         let salesChannelId: string | undefined
@@ -465,7 +463,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         let unitPrice: number
 
         product = await productModule.retrieveProduct(plan.product_id, {
-          relations: ["variants", "variants.prices", "sales_channels"],
+          relations: ["variants", "variants.prices"],
         })
 
         console.log("[subscriptions] Loaded product for plan", {
@@ -475,70 +473,98 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           variants_count: Array.isArray(product?.variants)
             ? product.variants.length
             : "n/a",
-          sales_channels: Array.isArray(product?.sales_channels)
-            ? product.sales_channels.map((sc: any) => sc.id)
-            : "n/a",
         })
 
         if (product?.title) {
           lineTitle = product.title
         }
 
-        // Choose variant + price from Medusa (NOT Stripe)
-        if (Array.isArray(product?.variants) && product.variants.length > 0) {
-          const variant = product.variants[0] // adjust if you want specific variant per plan
-          variantId = variant.id
-
-          const prices = (variant as any).prices || []
-          const variantPrice =
-            prices.find((p: any) => p.currency_code === currency) ?? prices[0]
-
-          if (!variantPrice) {
-            throw new Error(
-              `No price found for variant ${variantId} in currency ${currency}`
-            )
-          }
-
-          // Medusa expects minor units (e.g. cents)
-          unitPrice = variantPrice.amount
-
-          console.log("[subscriptions] Using Medusa variant price", {
-            variant_id: variantId,
-            currency,
-            unit_price: unitPrice,
-          })
-        } else {
+        // Require at least one variant
+        if (!Array.isArray(product?.variants) || product.variants.length === 0) {
           throw new Error(
             `Product ${plan.product_id} has no variants – cannot create order`
           )
         }
 
-        // Optional: log Stripe price for debugging only
-        const stripeUnitAmountCents = line?.price?.unit_amount ?? null
-        console.log("[subscriptions] Stripe vs Medusa price debug", {
-          stripeUnitAmountCents,
-          medusaUnitPrice: unitPrice,
-        })
+        const variant = product.variants[0]
+        variantId = variant.id
 
-        if (
-          Array.isArray(product?.sales_channels) &&
-          product.sales_channels.length > 0
-        ) {
-          salesChannelId = product.sales_channels[0].id
+        const prices = (variant as any).prices || []
+        const variantPrice =
+          prices.find((p: any) => p.currency_code === currency) ?? prices[0]
+
+        if (!variantPrice) {
+          throw new Error(
+            `No price found for variant ${variantId} in currency ${currency}`
+          )
         }
 
-        // 2) Sales channel fallback
+        let effectiveCurrency = variantPrice.currency_code
+        let effectiveUnitPrice = variantPrice.amount
+
+        // plan.unit_amount / plan.currency override variant price if set
+        const planAny = plan as any
+        if (planAny.unit_amount != null && planAny.currency) {
+          effectiveUnitPrice = planAny.unit_amount
+          effectiveCurrency = (planAny.currency as string).toLowerCase()
+
+          console.log("[subscriptions] Using plan.unit_amount for price", {
+            plan_id: plan.id,
+            unit_price: effectiveUnitPrice,
+            currency: effectiveCurrency,
+          })
+        } else {
+          console.log("[subscriptions] Using variant price for subscription", {
+            variant_id: variantId,
+            currency: effectiveCurrency,
+            unit_price: effectiveUnitPrice,
+          })
+        }
+
+        unitPrice = effectiveUnitPrice
+        currency = effectiveCurrency
+
+        // Optional: log Stripe line price for debugging only
+        const stripeUnitAmountCents = line?.price?.unit_amount ?? null
+        console.log("[subscriptions] Stripe vs effective subscription price", {
+          stripeUnitAmountCents,
+          effectiveUnitPrice: unitPrice,
+          effectiveCurrency: currency,
+        })
+
+        // 2) Resolve sales channel (no product.sales_channels)
+        try {
+          const salesChannelModule = req.scope.resolve<any>(
+            Modules.SALES_CHANNEL
+          )
+          const channels = await salesChannelModule.listSalesChannels({
+            take: 1,
+          })
+          if (channels && channels.length > 0) {
+            salesChannelId = channels[0].id
+            console.log(
+              "[subscriptions] Using first sales channel from module",
+              salesChannelId
+            )
+          }
+        } catch (e) {
+          console.warn(
+            "[subscriptions] Sales channel module not available or failed",
+            e
+          )
+        }
+
         if (!salesChannelId && SUBSCRIPTIONS_SALES_CHANNEL_ID) {
           salesChannelId = SUBSCRIPTIONS_SALES_CHANNEL_ID
           console.log(
-            "[subscriptions] Using fallback sales channel",
+            "[subscriptions] Using fallback sales channel from env",
             salesChannelId
           )
         }
 
         if (!salesChannelId) {
           throw new Error(
-            "No sales channel found – set SUBSCRIPTIONS_SALES_CHANNEL_ID or attach product to a sales channel"
+            "No sales channel found – set SUBSCRIPTIONS_SALES_CHANNEL_ID or enable sales channel module"
           )
         }
 
@@ -615,7 +641,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
               product_id: plan.product_id,
               variant_id: variantId,
               quantity: 1,
-              unit_price: unitPrice, // Medusa variant price (minor units)
+              unit_price: unitPrice, // minor units
             },
           ],
 
