@@ -1,4 +1,3 @@
-// src/api/hooks/stripe/subscriptions/route.ts
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import Stripe from "stripe"
 import SubscriptionModuleService from "../../../../modules/subscription/service"
@@ -446,6 +445,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       const line = invoiceAny.lines?.data?.[0]
       const period = line?.period
 
+      // Start from Stripe currency, but plan can override
       let currency = (invoiceAny.currency as string).toLowerCase()
       let createdOrder: any | null = null
 
@@ -454,7 +454,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         const productModule = req.scope.resolve<any>(Modules.PRODUCT)
         const regionModule = req.scope.resolve<any>(Modules.REGION)
 
-        // 1) Load product with variants + prices (no sales_channels relation!)
+        // 1) Load product with variants (no nested relations)
         let product: any | null = null
         let variantId: string | undefined
         let salesChannelId: string | undefined
@@ -463,7 +463,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         let unitPrice: number
 
         product = await productModule.retrieveProduct(plan.product_id, {
-          relations: ["variants", "variants.prices"],
+          relations: ["variants"],
         })
 
         console.log("[subscriptions] Loaded product for plan", {
@@ -489,42 +489,51 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         const variant = product.variants[0]
         variantId = variant.id
 
-        const prices = (variant as any).prices || []
-        const variantPrice =
-          prices.find((p: any) => p.currency_code === currency) ?? prices[0]
+        //
+        // PRICE PRIORITY:
+        //   1) plan.unit_amount + plan.currency (subscription-specific price)
+        //   2) else Stripe line unit_amount (still minor units)
+        //
+        const planAny = plan as any
 
-        if (!variantPrice) {
-          throw new Error(
-            `No price found for variant ${variantId} in currency ${currency}`
+        if (planAny.unit_amount != null && planAny.currency) {
+          unitPrice = planAny.unit_amount
+          currency = (planAny.currency as string).toLowerCase()
+          console.log("[subscriptions] Using plan.unit_amount for price", {
+            plan_id: plan.id,
+            unit_price: unitPrice,
+            currency,
+          })
+        } else {
+          let stripeUnitAmountCents: number | null =
+            (line?.price?.unit_amount as number | null) ?? null
+
+          if (
+            stripeUnitAmountCents == null &&
+            typeof invoiceAny.amount_paid === "number"
+          ) {
+            const qty = line?.quantity ?? 1
+            stripeUnitAmountCents = Math.round(invoiceAny.amount_paid / qty)
+          }
+
+          if (stripeUnitAmountCents == null) {
+            throw new Error(
+              `Could not determine unit price from Stripe invoice ${invoiceAny.id}`
+            )
+          }
+
+          unitPrice = stripeUnitAmountCents
+          console.warn(
+            "[subscriptions] plan.unit_amount missing, falling back to Stripe line price",
+            {
+              plan_id: plan.id,
+              unit_price: unitPrice,
+              currency,
+            }
           )
         }
 
-        let effectiveCurrency = variantPrice.currency_code
-        let effectiveUnitPrice = variantPrice.amount
-
-        // plan.unit_amount / plan.currency override variant price if set
-        const planAny = plan as any
-        if (planAny.unit_amount != null && planAny.currency) {
-          effectiveUnitPrice = planAny.unit_amount
-          effectiveCurrency = (planAny.currency as string).toLowerCase()
-
-          console.log("[subscriptions] Using plan.unit_amount for price", {
-            plan_id: plan.id,
-            unit_price: effectiveUnitPrice,
-            currency: effectiveCurrency,
-          })
-        } else {
-          console.log("[subscriptions] Using variant price for subscription", {
-            variant_id: variantId,
-            currency: effectiveCurrency,
-            unit_price: effectiveUnitPrice,
-          })
-        }
-
-        unitPrice = effectiveUnitPrice
-        currency = effectiveCurrency
-
-        // Optional: log Stripe line price for debugging only
+        // Optional: log comparison
         const stripeUnitAmountCents = line?.price?.unit_amount ?? null
         console.log("[subscriptions] Stripe vs effective subscription price", {
           stripeUnitAmountCents,
@@ -532,7 +541,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           effectiveCurrency: currency,
         })
 
-        // 2) Resolve sales channel (no product.sales_channels)
+        // 2) Resolve sales channel (module or env fallback)
         try {
           const salesChannelModule = req.scope.resolve<any>(
             Modules.SALES_CHANNEL
@@ -641,7 +650,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
               product_id: plan.product_id,
               variant_id: variantId,
               quantity: 1,
-              unit_price: unitPrice, // minor units
+              unit_price: unitPrice, // minor units (cents)
             },
           ],
 
