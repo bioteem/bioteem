@@ -35,7 +35,7 @@ export default async function Home({
         body="Designed to nourish your whole body, starting in your gut. We've developed a biological 'onion' (layers of nutrients) powered by over 30 diverse probiotic strains so you get the best results from your supplementation. Better gut health. Better absorption. Better you."
         imageSrc="/assets/products-vt.jpg"
         imageAlt="Lab glassware with capsules"
-      ><Button variant="secondary" asChild>
+      ><Button className="bg-[#4e7ec7] hover:bg-[#1e55a8] text-white" size="large" asChild>
           <a href="/about">Learn more</a>
         </Button></SplitSection>
       <div className="py-12">

@@ -24,7 +24,7 @@ const Hero = () => {
           <div className="inline-flex flex-col gap-4 rounded-3xl">
             <Heading
               level="h1"
-              className="text-3xl md:text-4xl leading-tight text-white text-ui-fg-base font-normal"
+              className="text-3xl md:text-4xl leading-tight text-white font-normal"
             >
               Designed to Nourish
             </Heading>
@@ -37,7 +37,7 @@ const Hero = () => {
 
             <div className="mt-4 flex justify-center">
               <Link href="/store">
-                <Button size="large" variant="primary">
+                <Button size="large" className="bg-[#4e7ec7] hover:bg-[#1e55a8] text-white">
                   Shop now
                 </Button>
               </Link>

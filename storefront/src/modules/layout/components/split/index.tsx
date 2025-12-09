@@ -60,7 +60,7 @@ const SplitSection = ({
 
   return (
     <section className="w-full py-12 md:py-16">
-      <div className="mx-auto flex max-w-6xl px-4 md:px-6">
+      <div className="mx-auto flex max-w-8xl px-4 md:px-6">
         <div className="grid w-full grid-cols-1 gap-10 lg:grid-cols-2 lg:items-center">
           {imageOnLeft ? (
             <>
