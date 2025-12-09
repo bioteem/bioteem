@@ -733,56 +733,57 @@ if (!variant) {
   const requiredQty = invItem.required_quantity ?? 1
   const allowBackorder = !!variant.allow_backorder
 
-  // 🔍 Ask the Inventory module for levels to get a location_id
-  const [levels] = await inventoryService.listInventoryLevels({
-    inventory_item_id: [inventoryItemId],
-  })
+ // 🔍 Ask the Inventory module for levels to get a location_id
+const levels = await inventoryService.listInventoryLevels({
+  inventory_item_id: [inventoryItemId],
+})
 
-  if (!levels || !levels.length) {
+if (!levels || levels.length === 0) {
+  console.warn(
+    "[subscriptions] No inventory levels found for inventory item, cannot reserve",
+    {
+      inventory_item_id: inventoryItemId,
+      variant_id: variantId,
+    }
+  )
+} else {
+  const level = levels[0]
+  const locationId = level.location_id
+
+  if (!locationId) {
     console.warn(
-      "[subscriptions] No inventory levels found for inventory item, cannot reserve",
+      "[subscriptions] Inventory level has no location_id, cannot reserve",
       {
         variant_id: variantId,
         inventory_item_id: inventoryItemId,
+        level_id: level.id,
       }
     )
   } else {
-    const locationId = levels[0].location_id
-
-    if (!locationId) {
-      console.warn(
-        "[subscriptions] Inventory level has no location_id, cannot reserve",
+    await locking.execute([inventoryItemId], async () => {
+      await inventoryService.createReservationItems([
         {
-          variant_id: variantId,
-          inventory_item_id: inventoryItemId,
-          level_id: levels[0].id,
-        }
-      )
-    } else {
-      await locking.execute([inventoryItemId], async () => {
-        await inventoryService.createReservationItems([
-          {
-            line_item_id: orderItem.id,
-            inventory_item_id: inventoryItemId,
-            quantity: requiredQty * qty,
-            allow_backorder: allowBackorder,
-            location_id: locationId,
-          },
-        ])
-      })
-
-      console.log(
-        "[subscriptions] Created inventory reservation for subscription order",
-        {
-          order_id: createdOrder.id,
           line_item_id: orderItem.id,
           inventory_item_id: inventoryItemId,
-          location_id: locationId,
           quantity: requiredQty * qty,
-        }
-      )
-    }
+          allow_backorder: allowBackorder,
+          location_id: locationId,
+        },
+      ])
+    })
+
+    console.log(
+      "[subscriptions] Created inventory reservation for subscription order",
+      {
+        order_id: createdOrder.id,
+        line_item_id: orderItem.id,
+        inventory_item_id: inventoryItemId,
+        location_id: locationId,
+        quantity: requiredQty * qty,
+      }
+    )
   }
+}
 }
 }
         } catch (reservationErr) {
