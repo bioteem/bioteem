@@ -5,6 +5,7 @@ import { StoreRegion } from "@medusajs/types"
 import LocalizedClientLink from "@modules/common/components/localized-client-link"
 import CartButton from "@modules/layout/components/cart-button"
 import SideMenu from "@modules/layout/components/side-menu"
+import Image from "next/image"
 
 export default async function Nav() {
   const regions = await listRegions().then((regions: StoreRegion[]) => regions)
@@ -19,15 +20,22 @@ export default async function Nav() {
             </div>
           </div>
 
-          <div className="flex items-center h-full">
-            <LocalizedClientLink
-              href="/"
-              className="txt-compact-xlarge-plus hover:text-ui-fg-base uppercase"
-              data-testid="nav-store-link"
-            >
-              Bioteem 40
-            </LocalizedClientLink>
-          </div>
+         <div className="flex items-center h-full">
+  <LocalizedClientLink
+    href="/"
+    className="flex items-center h-full"
+    data-testid="nav-store-link"
+  >
+    <Image
+      src="/logo.svg"
+      alt="Bioteem"
+      width={140}       // adjust to your navbar height
+      height={40}
+      className="bioteemlogo"
+      priority
+    />
+  </LocalizedClientLink>
+</div>
 
           <div className="flex items-center gap-x-6 h-full flex-1 basis-0 justify-end">
             <div className="hidden small:flex items-center gap-x-6 h-full">
