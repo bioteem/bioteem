@@ -138,7 +138,10 @@ export const getProductsListWithSort = cache(async function ({
     queryParams,
   }
 })
-export type SubscriptionPlan = {
+
+/**
+ * Fetch subscription plans for a given product id
+ */export type SubscriptionPlan = {
   id: string
   name: string
   interval: "day" | "week" | "month" | "year" | null
@@ -156,33 +159,22 @@ export type SubscriptionPlan = {
 export const getSubscriptionPlansForProduct = cache(async function (
   productId: string
 ): Promise<SubscriptionPlan[]> {
-  // 👇 adjust URL if you mount this route somewhere else
-  const res = await fetch(
-    `${process.env.NEXT_PUBLIC_MEDUSA_BACKEND_URL}/store/products/${productId}/subscription-plans`,
-    {
-      next: { tags: ["subscription-plans", productId] },
-    }
-  )
-
-  if (!res.ok) {
-  let body: any = null
-
   try {
-    body = await res.json()
-  } catch {
-    body = await res.text()
+    const data = await sdk.client.fetch<{
+      subscription_plans: SubscriptionPlan[]
+    }>(`/store/products/${productId}/subscription-plans`, {
+      method: "GET",
+      next: { tags: ["subscription-plans", productId] },
+    })
+
+    return data.subscription_plans ?? []
+  } catch (err) {
+    console.error(
+      "[storefront] Failed to fetch subscription plans for product",
+      productId,
+      err
+    )
+
+    return []
   }
-
-  console.error(
-    "[storefront] Failed to fetch subscription plans for product",
-    productId,
-    res.status,
-    body
-  )
-
-  return []
-}
-
-  const data = await res.json()
-  return (data.subscription_plans ?? []) as SubscriptionPlan[]
 })
