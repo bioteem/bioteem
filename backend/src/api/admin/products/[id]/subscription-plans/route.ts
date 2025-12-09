@@ -43,16 +43,3 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
 
   return res.json({ subscription_plan: plan })
 }
-
-export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
-  const { id: productId } = req.params
-
-  const subscriptionModuleService =
-    req.scope.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
-
-  const plans = await subscriptionModuleService.listSubscriptionPlans({
-    product_id: productId,
-  })
-
-  return res.json({ subscription_plans: plans })
-}
