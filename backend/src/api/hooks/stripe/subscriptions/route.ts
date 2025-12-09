@@ -3,7 +3,7 @@ import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import Stripe from "stripe"
 import SubscriptionModuleService from "../../../../modules/subscription/service"
 import { SUBSCRIPTION_MODULE } from "../../../../modules/subscription"
-import { Modules } from "@medusajs/framework/utils"
+import { Modules, ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import type { ICustomerModuleService } from "@medusajs/framework/types"
 
 const stripe = new Stripe(process.env.STRIPE_API_KEY!, {
@@ -475,6 +475,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         const productModule = req.scope.resolve<any>(Modules.PRODUCT)
         const regionModule = req.scope.resolve<any>(Modules.REGION)
         const inventoryModule = req.scope.resolve<any>(Modules.INVENTORY)
+        const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
 
         if (!SUBSCRIPTIONS_STOCK_LOCATION_ID) {
           console.warn(
@@ -489,20 +490,10 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         }
 
         // 1) Load product with variants (no sales_channels relation)
-const product = await productModule.retrieveProduct(plan.product_id, {
+        const product = await productModule.retrieveProduct(plan.product_id, {
   relations: ["variants"],
 })
 
-// Explicit typing so Map.get returns a proper variant object, not unknown
-type VariantLike = {
-  id: string
-  sku?: string | null
-  // add anything else you care about later…
-}
-
-const variantMap = new Map<string, VariantLike>(
-  (product.variants || []).map((v: any) => [v.id, v as VariantLike])
-)
         if (!product) {
           throw new Error(
             `Could not retrieve product ${plan.product_id} for subscription plan`
@@ -641,9 +632,9 @@ const variantMap = new Map<string, VariantLike>(
           "invoice",
           invoiceAny.id
         )
+
           // 4) Create inventory reservations for each line item (if configured)
-        
-        // 4) Create inventory reservations for each line item (if configured)
+           // 4) Create inventory reservations for each line item (if configured)
         try {
           if (!SUBSCRIPTIONS_STOCK_LOCATION_ID) {
             console.warn(
@@ -659,94 +650,46 @@ const variantMap = new Map<string, VariantLike>(
                 continue
               }
 
-              const variant = variantMap.get(item.variant_id)
-
-              if (!variant) {
-                console.warn(
-                  "[subscriptions] Could not find variant on product for line item, cannot reserve",
-                  { variant_id: item.variant_id, line_item_id: item.id }
-                )
-                continue
-              }
-
-              if (!variant.sku) {
-                console.warn(
-                  "[subscriptions] Variant has no SKU, cannot map to inventory item",
-                  { variant_id: variant.id, line_item_id: item.id }
-                )
-                continue
-              }
-
               try {
-                // 4a) Find all inventory items with this SKU
-                const inventoryItems = await inventoryModule.listInventoryItems({
-                  sku: variant.sku,
+                // Use module link: variant -> inventory_items
+                const { data: variants } = await query.graph({
+                  entity: "variant",
+                  fields: ["id", "inventory_items.id"], // we just need the ids
+                  filters: { id: item.variant_id },
                 })
 
-                if (!inventoryItems.length) {
+                const variant = variants?.[0]
+
+                if (!variant) {
                   console.warn(
-                    "[subscriptions] No inventory items found for SKU, cannot reserve",
-                    {
-                      sku: variant.sku,
-                      variant_id: variant.id,
-                      line_item_id: item.id,
-                    }
+                    "[subscriptions] No variant found via query.graph, cannot reserve",
+                    { variant_id: item.variant_id, line_item_id: item.id }
                   )
                   continue
                 }
 
-                // 4b) For each inventory item, check its levels; pick one that has levels
-                let chosenInventoryItem: any | null = null
-                let chosenLocationId: string | null = null
+                const invItems = (variant as any).inventory_items || []
 
-                for (const invItem of inventoryItems) {
-                  const levels = await inventoryModule.listInventoryLevels({
-                    inventory_item_id: invItem.id,
-                  })
-
-                  if (!levels.length) {
-                    continue
-                  }
-
-                  // Prefer the env location if present, otherwise first level
-                  let locationId = SUBSCRIPTIONS_STOCK_LOCATION_ID || levels[0].location_id
-
-                  if (SUBSCRIPTIONS_STOCK_LOCATION_ID) {
-                    const match = levels.find(
-                      (lvl: any) => lvl.location_id === SUBSCRIPTIONS_STOCK_LOCATION_ID
-                    )
-                    if (match) {
-                      locationId = match.location_id
-                    } else {
-                      // no level at the configured location for this item
-                      locationId = levels[0].location_id
-                    }
-                  }
-
-                  chosenInventoryItem = invItem
-                  chosenLocationId = locationId
-                  break
-                }
-
-                if (!chosenInventoryItem || !chosenLocationId) {
+                if (!invItems.length) {
                   console.warn(
-                    "[subscriptions] No inventory levels found for any inventory item with this SKU, cannot reserve",
-                    {
-                      sku: variant.sku,
-                      inventory_item_ids: inventoryItems.map((ii: any) => ii.id),
-                      line_item_id: item.id,
-                    }
+                    "[subscriptions] Variant has no inventory_items, cannot reserve",
+                    { variant_id: item.variant_id, line_item_id: item.id }
                   )
                   continue
                 }
 
-                // 4c) Create reservation (line_item_id is optional, but nice to keep)
+                const inventoryItemId = invItems[0].id
+
+                // If you really want to be extra-safe, you can check levels here,
+                // but since you said the item is stocked at your location and it's
+                // the only one, we'll just create the reservation directly.
                 await inventoryModule.createReservationItems([
                   {
-                    inventory_item_id: chosenInventoryItem.id,
-                    location_id: chosenLocationId,
+                    inventory_item_id: inventoryItemId,
+                    location_id: SUBSCRIPTIONS_STOCK_LOCATION_ID,
                     quantity: item.quantity ?? 1,
-                    line_item_id: item.id, // can be omitted if you really want, but it's helpful
+                    // line_item_id is optional – you can omit it if you prefer
+                    // line_item_id: item.id,
                     description: "Subscription cycle auto-reservation",
                   },
                 ])
@@ -755,9 +698,9 @@ const variantMap = new Map<string, VariantLike>(
                   "[subscriptions] Created reservation for line item",
                   item.id,
                   "inventory_item",
-                  chosenInventoryItem.id,
+                  inventoryItemId,
                   "location",
-                  chosenLocationId
+                  SUBSCRIPTIONS_STOCK_LOCATION_ID
                 )
               } catch (lineErr) {
                 console.warn(
@@ -780,6 +723,7 @@ const variantMap = new Map<string, VariantLike>(
             }
           )
         }
+
         // 5) Mark order as paid (Stripe already charged)
         try {
           const orderTotal =
