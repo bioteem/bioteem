@@ -79,7 +79,7 @@ const medusaConfig = {
       key: Modules.EVENT_BUS,
       resolve: '@medusajs/event-bus-redis',
       options: {
-        // redisUrl: REDIS_URL
+        redisUrl: REDIS_URL
       }
     },
     {
