@@ -165,13 +165,23 @@ export const getSubscriptionPlansForProduct = cache(async function (
   )
 
   if (!res.ok) {
-    console.error(
-      "[storefront] Failed to fetch subscription plans for product",
-      productId,
-      res.status
-    )
-    return []
+  let body: any = null
+
+  try {
+    body = await res.json()
+  } catch {
+    body = await res.text()
   }
+
+  console.error(
+    "[storefront] Failed to fetch subscription plans for product",
+    productId,
+    res.status,
+    body
+  )
+
+  return []
+}
 
   const data = await res.json()
   return (data.subscription_plans ?? []) as SubscriptionPlan[]
