@@ -585,6 +585,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
             {
               shipping_option_id: SUBSCRIPTIONS_SHIPPING_OPTION_ID,
               amount: 0, // free shipping
+              name: "Subscription Shipping", 
             },
           ]
         }
