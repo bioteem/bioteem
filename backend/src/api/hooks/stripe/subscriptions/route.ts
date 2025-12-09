@@ -7,7 +7,7 @@ import { Modules } from "@medusajs/framework/utils"
 import type { ICustomerModuleService } from "@medusajs/framework/types"
 
 const stripe = new Stripe(process.env.STRIPE_API_KEY!, {
-  // @ts-ignore – keep default API version if not set
+  // Use project API version if set; otherwise Stripe uses default
   apiVersion: process.env.STRIPE_API_VERSION as any,
 })
 
@@ -488,9 +488,9 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           )
         }
 
-        // 1) Load product with variants + sales channels
+        // 1) Load product with variants (no sales_channels relation)
         const product = await productModule.retrieveProduct(plan.product_id, {
-          relations: ["variants", "sales_channels"],
+          relations: ["variants"],
         })
 
         if (!product) {
@@ -512,20 +512,12 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           )
         }
 
-        if (
-          Array.isArray(product.sales_channels) &&
-          product.sales_channels.length > 0
-        ) {
-          salesChannelId = product.sales_channels[0].id
-        } else if (SUBSCRIPTIONS_SALES_CHANNEL_ID) {
+        // Use env-configured sales channel (simpler than loading relation)
+        if (SUBSCRIPTIONS_SALES_CHANNEL_ID) {
           salesChannelId = SUBSCRIPTIONS_SALES_CHANNEL_ID
-          console.log(
-            "[subscriptions] Using fallback sales channel",
-            salesChannelId
-          )
         } else {
-          throw new Error(
-            "No sales channel found – attach product to a sales channel or set SUBSCRIPTIONS_SALES_CHANNEL_ID"
+          console.warn(
+            "[subscriptions] SUBSCRIPTIONS_SALES_CHANNEL_ID not set – order will have no sales channel"
           )
         }
 
