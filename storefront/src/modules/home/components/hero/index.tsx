@@ -7,7 +7,7 @@ const Hero = () => {
     <section className="relative h-[75vh] w-full overflow-hidden border-b border-ui-border-base bg-ui-bg-subtle">
       {/* Background image */}
       <Image
-        src="/hero-all.jpg" // put your image in /public/hero-bg.jpg
+        src="/assets/hero-all.jpg" // put your image in /public/hero-bg.jpg
         alt="Bioteem background"
         fill
         priority
@@ -26,14 +26,14 @@ const Hero = () => {
               level="h1"
               className="text-3xl md:text-4xl leading-tight text-ui-fg-base font-normal"
             >
-              Feel good from the inside out.
+              Designed to Nourish
             </Heading>
-            <Heading
+            {/* <Heading
               level="h2"
               className="text-base md:text-lg text-ui-fg-subtle font-normal"
             >
               Daily probiotic support tailored for your gut and lifestyle.
-            </Heading>
+            </Heading> */}
 
             <div className="mt-4 flex justify-center">
               <Link href="/store">
