@@ -1,3 +1,4 @@
+// src/api/hooks/stripe/subscriptions/route.ts
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import Stripe from "stripe"
 import SubscriptionModuleService from "../../../../modules/subscription/service"
@@ -27,6 +28,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   let event: Stripe.Event
 
   if (req.rawBody) {
+    // Preferred: verify signature using raw body
     try {
       event = stripe.webhooks.constructEvent(req.rawBody, sig, webhookSecret)
     } catch (err: any) {
@@ -37,6 +39,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       return res.status(400).send(`Webhook Error: ${err.message}`)
     }
   } else {
+    // Fallback: no raw body, skip signature verification
     console.warn(
       "[subscriptions] rawBody missing, falling back to parsed body without signature verification"
     )
@@ -445,29 +448,46 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       const line = invoiceAny.lines?.data?.[0]
       const period = line?.period
 
-      // Start from Stripe currency, but plan can override
-      let currency = (invoiceAny.currency as string).toLowerCase()
+      //
+      // PRICE: use Stripe’s line price (cents) → convert to Medusa major units
+      //
+      let stripeUnitAmountCents: number | null =
+        line?.price?.unit_amount ?? null
+
+      if (
+        stripeUnitAmountCents == null &&
+        typeof invoiceAny.amount_paid === "number"
+      ) {
+        const qty = line?.quantity ?? 1
+        stripeUnitAmountCents = Math.round(invoiceAny.amount_paid / qty)
+      }
+
+      if (stripeUnitAmountCents == null) {
+        console.warn(
+          "[subscriptions] Could not determine Stripe unit amount for invoice",
+          invoiceAny.id
+        )
+        break
+      }
+
+      // Medusa order amounts appear to be in MAJOR units → divide by 100
+      const unitPrice = Math.round(stripeUnitAmountCents / 100)
+      const currency = (invoiceAny.currency as string).toLowerCase()
+
       let createdOrder: any | null = null
+      let variantId: string | undefined
 
       try {
         const orderModule = req.scope.resolve<any>(Modules.ORDER)
         const productModule = req.scope.resolve<any>(Modules.PRODUCT)
         const regionModule = req.scope.resolve<any>(Modules.REGION)
 
-        // 1) Load product with variants (no nested relations)
-        let product: any | null = null
-        let variantId: string | undefined
-        let salesChannelId: string | undefined
-        let regionId: string | undefined
-        let lineTitle = "Subscription order"
-        let unitPrice: number
-
-        product = await productModule.retrieveProduct(plan.product_id, {
+        // 1) Load product with variants
+        const product = await productModule.retrieveProduct(plan.product_id, {
           relations: ["variants"],
         })
 
         console.log("[subscriptions] Loaded product for plan", {
-          plan_id: plan.id,
           product_id: plan.product_id,
           title: product?.title,
           variants_count: Array.isArray(product?.variants)
@@ -475,110 +495,43 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
             : "n/a",
         })
 
-        if (product?.title) {
-          lineTitle = product.title
-        }
+        let lineTitle = product?.title || "Subscription order"
 
-        // Require at least one variant
-        if (!Array.isArray(product?.variants) || product.variants.length === 0) {
+        if (Array.isArray(product?.variants) && product.variants.length > 0) {
+          variantId = product.variants[0].id
+        } else {
           throw new Error(
             `Product ${plan.product_id} has no variants – cannot create order`
           )
         }
 
-        const variant = product.variants[0]
-        variantId = variant.id
+        // 2) Sales channel
+        let salesChannelId: string | undefined
 
-        //
-        // PRICE PRIORITY:
-        //   1) plan.unit_amount + plan.currency (subscription-specific price)
-        //   2) else Stripe line unit_amount (still minor units)
-        //
-        const planAny = plan as any
-
-        if (planAny.unit_amount != null && planAny.currency) {
-          unitPrice = planAny.unit_amount
-          currency = (planAny.currency as string).toLowerCase()
-          console.log("[subscriptions] Using plan.unit_amount for price", {
-            plan_id: plan.id,
-            unit_price: unitPrice,
-            currency,
-          })
-        } else {
-          let stripeUnitAmountCents: number | null =
-            (line?.price?.unit_amount as number | null) ?? null
-
-          if (
-            stripeUnitAmountCents == null &&
-            typeof invoiceAny.amount_paid === "number"
-          ) {
-            const qty = line?.quantity ?? 1
-            stripeUnitAmountCents = Math.round(invoiceAny.amount_paid / qty)
-          }
-
-          if (stripeUnitAmountCents == null) {
-            throw new Error(
-              `Could not determine unit price from Stripe invoice ${invoiceAny.id}`
-            )
-          }
-
-          unitPrice = stripeUnitAmountCents
-          console.warn(
-            "[subscriptions] plan.unit_amount missing, falling back to Stripe line price",
-            {
-              plan_id: plan.id,
-              unit_price: unitPrice,
-              currency,
-            }
-          )
-        }
-
-        // Optional: log comparison
-        const stripeUnitAmountCents = line?.price?.unit_amount ?? null
-        console.log("[subscriptions] Stripe vs effective subscription price", {
-          stripeUnitAmountCents,
-          effectiveUnitPrice: unitPrice,
-          effectiveCurrency: currency,
-        })
-
-        // 2) Resolve sales channel (module or env fallback)
-        try {
-          const salesChannelModule = req.scope.resolve<any>(
-            Modules.SALES_CHANNEL
-          )
-          const channels = await salesChannelModule.listSalesChannels({
-            take: 1,
-          })
-          if (channels && channels.length > 0) {
-            salesChannelId = channels[0].id
-            console.log(
-              "[subscriptions] Using first sales channel from module",
-              salesChannelId
-            )
-          }
-        } catch (e) {
-          console.warn(
-            "[subscriptions] Sales channel module not available or failed",
-            e
-          )
+        if (
+          Array.isArray(product?.sales_channels) &&
+          product.sales_channels.length > 0
+        ) {
+          salesChannelId = product.sales_channels[0].id
         }
 
         if (!salesChannelId && SUBSCRIPTIONS_SALES_CHANNEL_ID) {
           salesChannelId = SUBSCRIPTIONS_SALES_CHANNEL_ID
           console.log(
-            "[subscriptions] Using fallback sales channel from env",
+            "[subscriptions] Using fallback sales channel",
             salesChannelId
           )
         }
 
         if (!salesChannelId) {
           throw new Error(
-            "No sales channel found – set SUBSCRIPTIONS_SALES_CHANNEL_ID or enable sales channel module"
+            "No sales channel found – set SUBSCRIPTIONS_SALES_CHANNEL_ID or attach product to a sales channel"
           )
         }
 
         // 3) Resolve region by shipping country
         const countryCode = sub.shipping_country?.toLowerCase()
+        let regionId: string | undefined
 
         if (countryCode) {
           const regions = await regionModule.listRegions({
@@ -650,7 +603,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
               product_id: plan.product_id,
               variant_id: variantId,
               quantity: 1,
-              unit_price: unitPrice, // minor units (cents)
+              unit_price: unitPrice, // major units, not cents
             },
           ],
 
@@ -725,6 +678,107 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
             "[subscriptions] Failed to mark order as paid",
             createdOrder?.id,
             markPaidErr
+          )
+        }
+
+        //
+        // 6) 🔐 Create inventory reservation so fulfillment works
+        //
+        try {
+          const query = req.scope.resolve<any>("query")
+          const inventoryService = req.scope.resolve<any>(Modules.INVENTORY)
+          const locking = req.scope.resolve<any>(Modules.LOCKING)
+
+          const orderItem = createdOrder?.items?.[0]
+
+          if (!orderItem || !variantId) {
+            console.log(
+              "[subscriptions] No order item or variantId, skipping reservations"
+            )
+          } else {
+            // Load variant + inventory item + location levels
+            const { data: variants } = await query.graph({
+              entity: "product_variant",
+              fields: [
+                "id",
+                "manage_inventory",
+                "allow_backorder",
+                "inventory_items.id",
+                "inventory_items.required_quantity",
+                "inventory_items.location_levels.location_id",
+              ],
+              filters: { id: variantId },
+            })
+
+            const variant = variants?.[0]
+
+            if (!variant) {
+              console.warn(
+                "[subscriptions] Could not load variant for reservations",
+                { variant_id: variantId }
+              )
+            } else if (!variant.manage_inventory) {
+              console.log(
+                "[subscriptions] Variant manage_inventory=false, not reserving",
+                { variant_id: variantId }
+              )
+            } else if (
+              !variant.inventory_items ||
+              !variant.inventory_items.length
+            ) {
+              console.warn(
+                "[subscriptions] Variant has no inventory_items, cannot reserve",
+                { variant_id: variantId }
+              )
+            } else {
+              const invItem = variant.inventory_items[0]
+              const locationLevel =
+                invItem.location_levels && invItem.location_levels[0]
+
+              if (!locationLevel?.location_id) {
+                console.warn(
+                  "[subscriptions] Inventory item has no stock locations, cannot reserve",
+                  {
+                    variant_id: variantId,
+                    inventory_item_id: invItem.id,
+                  }
+                )
+              } else {
+                const inventoryItemId = invItem.id
+                const locationId = locationLevel.location_id
+                const qty = orderItem.quantity ?? 1
+                const requiredQty = invItem.required_quantity ?? 1
+                const allowBackorder = !!variant.allow_backorder
+
+                await locking.execute([inventoryItemId], async () => {
+                  await inventoryService.createReservationItems([
+                    {
+                      line_item_id: orderItem.id,
+                      inventory_item_id: inventoryItemId,
+                      quantity: requiredQty * qty,
+                      allow_backorder: allowBackorder,
+                      location_id: locationId,
+                    },
+                  ])
+                })
+
+                console.log(
+                  "[subscriptions] Created inventory reservation for subscription order",
+                  {
+                    order_id: createdOrder.id,
+                    line_item_id: orderItem.id,
+                    inventory_item_id: inventoryItemId,
+                    location_id: locationId,
+                    quantity: requiredQty * qty,
+                  }
+                )
+              }
+            }
+          }
+        } catch (reservationErr) {
+          console.warn(
+            "[subscriptions] Failed to create inventory reservation for subscription order",
+            reservationErr
           )
         }
       } catch (err) {
