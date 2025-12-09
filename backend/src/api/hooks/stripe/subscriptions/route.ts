@@ -676,26 +676,59 @@ const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
                   continue
                 }
 
-                const inventoryItemId = invItems[0].id
+              const inventoryItemId = invItems[0].id
 
-                await inventoryModule.createReservationItems([
-                  {
-                    inventory_item_id: inventoryItemId,
-                    location_id: SUBSCRIPTIONS_STOCK_LOCATION_ID,
-                    quantity: item.quantity ?? 1,
-                    line_item_id: item.id,
-                    description: "Subscription cycle auto-reservation",
-                  },
-                ])
+// Ask Medusa where this item actually has levels
+const levels = await inventoryModule.listInventoryLevels({
+  inventory_item_id: inventoryItemId,
+})
 
-                console.log(
-                  "[subscriptions] Created reservation for line item",
-                  item.id,
-                  "inventory_item",
-                  inventoryItemId,
-                  "location",
-                  SUBSCRIPTIONS_STOCK_LOCATION_ID
-                )
+if (!levels.length) {
+  console.warn(
+    "[subscriptions] Inventory item has no levels at any location, cannot reserve",
+    { inventory_item_id: inventoryItemId, line_item_id: item.id }
+  )
+  continue
+}
+
+// Prefer env location if it exists for this item, otherwise fallback
+let locationId = SUBSCRIPTIONS_STOCK_LOCATION_ID
+
+if (locationId) {
+  const match = levels.find((lvl: any) => lvl.location_id === locationId)
+  if (!match) {
+    console.warn(
+      "[subscriptions] Configured stock location has no level for this item, falling back to first level",
+      {
+        inventory_item_id: inventoryItemId,
+        configured_location_id: locationId,
+        available_locations: levels.map((l: any) => l.location_id),
+      }
+    )
+    locationId = levels[0].location_id
+  }
+} else {
+  locationId = levels[0].location_id
+}
+
+await inventoryModule.createReservationItems([
+  {
+    inventory_item_id: inventoryItemId,
+    location_id: locationId,
+    quantity: item.quantity ?? 1,
+    line_item_id: item.id,
+    description: "Subscription cycle auto-reservation",
+  },
+])
+
+console.log(
+  "[subscriptions] Created reservation for line item",
+  item.id,
+  "inventory_item",
+  inventoryItemId,
+  "location",
+  locationId
+)
               } catch (lineErr) {
                 console.warn(
                   "[subscriptions] Failed to reserve inventory for line item",
