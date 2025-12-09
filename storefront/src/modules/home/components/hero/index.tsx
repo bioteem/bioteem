@@ -11,20 +11,20 @@ const Hero = () => {
         alt="Bioteem background"
         fill
         priority
-        className="object-cover"
+        className="object-cover blur-md brightness-90"
       />
 
       {/* Slight dark overlay to boost contrast */}
-      <div className="absolute inset-0 bg-black/30" />
+  <div className="absolute inset-0 bg-black/20 -z-10" />
 
       {/* Content */}
       <div className="relative z-10 flex h-full w-full items-center justify-center px-4">
         <div className="max-w-2xl text-center">
           {/* Blurred card behind text */}
-          <div className="inline-flex flex-col gap-4 rounded-3xl bg-ui-bg-subtle/60 px-8 py-6 backdrop-blur-md">
+          <div className="inline-flex flex-col gap-4 rounded-3xl">
             <Heading
               level="h1"
-              className="text-3xl md:text-4xl leading-tight text-ui-fg-base font-normal"
+              className="text-3xl md:text-4xl leading-tight text-white text-ui-fg-base font-normal"
             >
               Designed to Nourish
             </Heading>

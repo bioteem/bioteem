@@ -33,7 +33,7 @@ export default async function Home({
         eyebrow="Science-backed"
         title="The most advanced supplement delivery."
         body="Designed to nourish your whole body, starting in your gut. We've developed a biological 'onion' (layers of nutrients) powered by over 30 diverse probiotic strains so you get the best results from your supplementation. Better gut health. Better absorption. Better you."
-        imageSrc="/assets/product-vt.jpg"
+        imageSrc="/assets/products-vt.jpg"
         imageAlt="Lab glassware with capsules"
       ><Button variant="secondary" asChild>
           <a href="/about">Learn more</a>
