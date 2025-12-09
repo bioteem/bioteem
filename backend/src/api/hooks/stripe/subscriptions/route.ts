@@ -481,10 +481,13 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
 
         // Import core flows at runtime to avoid circular deps
         const coreFlows = await import("@medusajs/medusa/core-flows")
-        const { addToCartWorkflow } = coreFlows
-        const { createPaymentCollectionForCartWorkflow } = coreFlows
-        const { createPaymentSessionsWorkflow } = coreFlows
-        const { completeCartWorkflow } = coreFlows
+const { addToCartWorkflow } = coreFlows
+const { createPaymentCollectionForCartWorkflow } = coreFlows
+const { createPaymentSessionsWorkflow } = coreFlows
+const { completeCartWorkflow } = coreFlows
+const { addShippingMethodToCartWorkflow } = coreFlows
+
+
 
         // 1) Load product + variant
         const product = await productModule.retrieveProduct(plan.product_id, {
@@ -580,15 +583,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           },
         }
 
-        if (SUBSCRIPTIONS_SHIPPING_OPTION_ID) {
-          cartInput.shipping_methods = [
-            {
-              shipping_option_id: SUBSCRIPTIONS_SHIPPING_OPTION_ID,
-              amount: 0, // free shipping
-              name: "Subscription Shipping", 
-            },
-          ]
-        }
+      
 
         const cart = await cartModule.createCarts(cartInput)
 
@@ -622,7 +617,27 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           "cart",
           cart.id
         )
+// 4b) Attach shipping method to cart (required for shippable items)
+if (SUBSCRIPTIONS_SHIPPING_OPTION_ID) {
+  await addShippingMethodToCartWorkflow(req.scope).run({
+  input: {
+    cart_id: cart.id,
+    options: [
+      {
+        id: SUBSCRIPTIONS_SHIPPING_OPTION_ID,
+        data: {}, // optional
+      },
+    ],
+  },
+})
 
+  console.log(
+    "[subscriptions] Attached shipping method",
+    SUBSCRIPTIONS_SHIPPING_OPTION_ID,
+    "to cart",
+    cart.id
+  )
+}
         // 5) Create payment collection + payment session (system default)
         const { result: paymentCollection } =
           await createPaymentCollectionForCartWorkflow(req.scope).run({
