@@ -27,7 +27,7 @@ export default async function Nav() {
     data-testid="nav-store-link"
   >
     <Image
-      src="/logo.svg"
+      src="/bioteemlogo.png"
       alt="Bioteem"
       width={140}       // adjust to your navbar height
       height={40}
