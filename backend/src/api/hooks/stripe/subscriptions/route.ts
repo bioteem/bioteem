@@ -619,15 +619,10 @@ const { addShippingMethodToCartWorkflow } = coreFlows
         )
 // 4b) Attach shipping method to cart (required for shippable items)
 if (SUBSCRIPTIONS_SHIPPING_OPTION_ID) {
-  await addShippingMethodToCartWorkflow(req.scope).run({
+await addShippingMethodToCartWorkflow(req.scope).run({
   input: {
     cart_id: cart.id,
-    options: [
-      {
-        id: SUBSCRIPTIONS_SHIPPING_OPTION_ID,
-        data: {}, // optional
-      },
-    ],
+    options: [{ id: SUBSCRIPTIONS_SHIPPING_OPTION_ID }],
   },
 })
 
