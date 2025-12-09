@@ -3,11 +3,10 @@ import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import Stripe from "stripe"
 import SubscriptionModuleService from "../../../../modules/subscription/service"
 import { SUBSCRIPTION_MODULE } from "../../../../modules/subscription"
-import { Modules, ContainerRegistrationKeys } from "@medusajs/framework/utils"
+import { Modules } from "@medusajs/framework/utils"
 import type { ICustomerModuleService } from "@medusajs/framework/types"
 
 const stripe = new Stripe(process.env.STRIPE_API_KEY!, {
-  // Use project API version if set; otherwise Stripe uses default
   apiVersion: process.env.STRIPE_API_VERSION as any,
 })
 
@@ -18,8 +17,10 @@ const SUBSCRIPTIONS_REGION_ID =
   process.env.SUBSCRIPTIONS_REGION_ID || undefined
 const SUBSCRIPTIONS_SHIPPING_OPTION_ID =
   process.env.SUBSCRIPTIONS_SHIPPING_OPTION_ID || undefined
-const SUBSCRIPTIONS_STOCK_LOCATION_ID =
-  process.env.SUBSCRIPTIONS_STOCK_LOCATION_ID || undefined
+
+// System default payment provider id
+const SUBSCRIPTIONS_PAYMENT_PROVIDER_ID =
+  process.env.SUBSCRIPTIONS_PAYMENT_PROVIDER_ID || "pp_system_default"
 
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   const sig = req.headers["stripe-signature"] as string | undefined
@@ -369,7 +370,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     }
 
     //
-    // 3) INVOICE PAYMENT SUCCEEDED → create + reserve order for that cycle
+    // 3) INVOICE PAYMENT SUCCEEDED → use cart workflow to create order
     //
     case "invoice.payment_succeeded": {
       const invoiceAny = event.data.object as any
@@ -382,6 +383,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         break
       }
 
+      // Stripe subscription id on invoice
       let stripeSubId: string | null =
         (invoiceAny.subscription as string | null) ?? null
 
@@ -414,7 +416,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         break
       }
 
-      // Idempotency
+      // Idempotency: already processed this invoice?
       if (sub.stripe_latest_invoice_id === invoiceAny.id && sub.last_order_id) {
         console.log(
           "[subscriptions] Invoice already processed for subscription",
@@ -445,7 +447,8 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       const firstLine = invoiceAny.lines?.data?.[0]
       const period = firstLine?.period
 
-      // Price from Stripe (cents → major)
+      // Price from Stripe (cents → major) – used for metadata and sanity,
+      // but the actual line-item price will come from the variant / price list.
       let stripeUnitAmountCents: number | null =
         firstLine?.price?.unit_amount ?? null
 
@@ -465,64 +468,44 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         break
       }
 
-      const unitPrice = Math.round(stripeUnitAmountCents / 100)
+      const unitPriceFromStripe = Math.round(stripeUnitAmountCents / 100)
       const currency = (invoiceAny.currency as string).toLowerCase()
 
       let createdOrder: any | null = null
 
       try {
-        const orderModule = req.scope.resolve<any>(Modules.ORDER)
         const productModule = req.scope.resolve<any>(Modules.PRODUCT)
         const regionModule = req.scope.resolve<any>(Modules.REGION)
-        const inventoryModule = req.scope.resolve<any>(Modules.INVENTORY)
-        const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+        const cartModule = req.scope.resolve<any>(Modules.CART)
+        const orderModule = req.scope.resolve<any>(Modules.ORDER)
 
-        if (!SUBSCRIPTIONS_STOCK_LOCATION_ID) {
-          console.warn(
-            "[subscriptions] SUBSCRIPTIONS_STOCK_LOCATION_ID not set – reservations will not be created"
-          )
-        }
+        // Import core flows at runtime to avoid circular deps
+        const coreFlows = await import("@medusajs/medusa/core-flows")
+        const { addToCartWorkflow } = coreFlows
+        const { createPaymentCollectionForCartWorkflow } = coreFlows
+        const { createPaymentSessionsWorkflow } = coreFlows
+        const { completeCartWorkflow } = coreFlows
 
-        if (!SUBSCRIPTIONS_SHIPPING_OPTION_ID) {
-          console.warn(
-            "[subscriptions] SUBSCRIPTIONS_SHIPPING_OPTION_ID not set – orders will have no shipping method"
-          )
-        }
-
-        // 1) Load product with variants (no sales_channels relation)
+        // 1) Load product + variant
         const product = await productModule.retrieveProduct(plan.product_id, {
-  relations: ["variants"],
-})
+          relations: ["variants"],
+        })
 
-        if (!product) {
+        if (!product || !Array.isArray(product.variants) || !product.variants.length) {
           throw new Error(
-            `Could not retrieve product ${plan.product_id} for subscription plan`
+            `Product ${plan.product_id} has no variants – cannot create cart`
           )
         }
 
-        let variantId: string | undefined
-        let salesChannelId: string | undefined
-        let regionId: string | undefined
-        let lineTitle = product.title || "Subscription order"
+        const variantId: string = product.variants[0].id
+        let salesChannelId: string | undefined = undefined
+        let regionId: string | undefined = undefined
 
-        if (Array.isArray(product.variants) && product.variants.length > 0) {
-          variantId = product.variants[0].id
-        } else {
-          throw new Error(
-            `Product ${plan.product_id} has no variants – cannot create order`
-          )
-        }
-
-        // Use env-configured sales channel (simpler than loading relation)
         if (SUBSCRIPTIONS_SALES_CHANNEL_ID) {
           salesChannelId = SUBSCRIPTIONS_SALES_CHANNEL_ID
-        } else {
-          console.warn(
-            "[subscriptions] SUBSCRIPTIONS_SALES_CHANNEL_ID not set – order will have no sales channel"
-          )
         }
 
-        // 2) Resolve region by shipping country with fallbacks
+        // 2) Resolve region (by shipping country, fallback to env, then first region)
         const countryCode = sub.shipping_country?.toLowerCase()
 
         if (countryCode) {
@@ -567,23 +550,13 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           validCountryCode = "us"
         }
 
-        // 3) Build order payload (with free shipping method)
-        const orderInput: any = {
-          customer_id: sub.customer_id,
-          email: sub.billing_email ?? undefined,
-          currency_code: currency,
+        // 3) Create cart (with shipping address + optional shipping method)
+        const cartInput: any = {
           region_id: regionId,
           sales_channel_id: salesChannelId,
-
-          items: [
-            {
-              title: lineTitle,
-              product_id: plan.product_id,
-              variant_id: variantId,
-              quantity: 1,
-              unit_price: unitPrice,
-            },
-          ],
+          email: sub.billing_email ?? undefined,
+          customer_id: sub.customer_id,
+          currency_code: currency,
 
           shipping_address: {
             first_name: sub.shipping_name ?? "Subscriber",
@@ -597,171 +570,105 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
             country_code: validCountryCode,
           },
 
-          ...(SUBSCRIPTIONS_SHIPPING_OPTION_ID && {
-            shipping_methods: [
-              {
-                shipping_option_id: SUBSCRIPTIONS_SHIPPING_OPTION_ID,
-                name:"Subscription Shipping ",
-                amount: 0, // free shipping for subscriptions
-              },
-            ],
-          }),
-
           metadata: {
             subscription_id: sub.id,
             stripe_subscription_id: stripeSubId,
             stripe_invoice_id: invoiceAny.id,
             stripe_customer_id: sub.stripe_customer_id,
             subscription_plan_name: plan.name,
+            stripe_unit_price: unitPriceFromStripe,
           },
         }
 
+        if (SUBSCRIPTIONS_SHIPPING_OPTION_ID) {
+          cartInput.shipping_methods = [
+            {
+              shipping_option_id: SUBSCRIPTIONS_SHIPPING_OPTION_ID,
+              amount: 0, // free shipping
+            },
+          ]
+        }
+
+        const cart = await cartModule.createCarts(cartInput)
+
         console.log(
-          "[subscriptions] Final orderInput payload",
-          JSON.stringify(orderInput, null, 2)
+          "[subscriptions] Created cart",
+          cart.id,
+          "for subscription",
+          sub.id
         )
 
-        const result = await orderModule.createOrders(orderInput as any)
-        createdOrder = Array.isArray(result) ? result[0] : result
+        // 4) Add subscription line item (using standard addToCartWorkflow)
+        await addToCartWorkflow(req.scope).run({
+          input: {
+            cart_id: cart.id,
+            items: [
+              {
+                variant_id: variantId,
+                quantity: 1,
+                // NOTE: we are not overriding price here; Medusa will use the
+                // variant's price. If you want the exact Stripe price, we can
+                // later introduce a custom add-to-cart workflow that sets
+                // is_custom_price + unit_price.
+              },
+            ],
+          },
+        })
 
         console.log(
-          "[subscriptions] Created order",
+          "[subscriptions] Added variant to cart",
+          variantId,
+          "cart",
+          cart.id
+        )
+
+        // 5) Create payment collection + payment session (system default)
+        const { result: paymentCollection } =
+          await createPaymentCollectionForCartWorkflow(req.scope).run({
+            input: {
+              cart_id: cart.id,
+            },
+          })
+
+        await createPaymentSessionsWorkflow(req.scope).run({
+          input: {
+            payment_collection_id: paymentCollection.id,
+            provider_id: SUBSCRIPTIONS_PAYMENT_PROVIDER_ID,
+            data: {
+              stripe_invoice_id: invoiceAny.id,
+              stripe_subscription_id: stripeSubId,
+              already_paid: true,
+            },
+          },
+        })
+
+        console.log(
+          "[subscriptions] Created payment collection + session for cart",
+          cart.id
+        )
+
+        // 6) Complete cart → creates order + reservations + payment
+        const { result: completed } = await completeCartWorkflow(
+          req.scope
+        ).run({
+          input: {
+            id: cart.id,
+          },
+        })
+
+        createdOrder = completed
+
+        console.log(
+          "[subscriptions] Created order via cart workflow",
           createdOrder?.id,
           "for subscription",
           sub.id,
           "invoice",
           invoiceAny.id
         )
-
-          // 4) Create inventory reservations for each line item (if configured)
-           // 4) Create inventory reservations for each line item (if configured)
-        try {
-          if (!SUBSCRIPTIONS_STOCK_LOCATION_ID) {
-            console.warn(
-              "[subscriptions] Skipping reservation – no SUBSCRIPTIONS_STOCK_LOCATION_ID env set"
-            )
-          } else if (Array.isArray(createdOrder?.items)) {
-            for (const item of createdOrder.items) {
-              if (!item.variant_id) {
-                console.warn(
-                  "[subscriptions] Line item has no variant_id, cannot reserve",
-                  { line_item_id: item.id }
-                )
-                continue
-              }
-
-              try {
-                // Use module link: variant -> inventory_items
-                const { data: variants } = await query.graph({
-                  entity: "variant",
-                  fields: ["id", "inventory_items.id"], // we just need the ids
-                  filters: { id: item.variant_id },
-                })
-
-                const variant = variants?.[0]
-
-                if (!variant) {
-                  console.warn(
-                    "[subscriptions] No variant found via query.graph, cannot reserve",
-                    { variant_id: item.variant_id, line_item_id: item.id }
-                  )
-                  continue
-                }
-
-                const invItems = (variant as any).inventory_items || []
-
-                if (!invItems.length) {
-                  console.warn(
-                    "[subscriptions] Variant has no inventory_items, cannot reserve",
-                    { variant_id: item.variant_id, line_item_id: item.id }
-                  )
-                  continue
-                }
-
-                const inventoryItemId = invItems[0].id
-
-                // If you really want to be extra-safe, you can check levels here,
-                // but since you said the item is stocked at your location and it's
-                // the only one, we'll just create the reservation directly.
-                await inventoryModule.createReservationItems([
-                  {
-                    inventory_item_id: inventoryItemId,
-                    location_id: SUBSCRIPTIONS_STOCK_LOCATION_ID,
-                    quantity: item.quantity ?? 1,
-                    // line_item_id is optional – you can omit it if you prefer
-                    // line_item_id: item.id,
-                    description: "Subscription cycle auto-reservation",
-                  },
-                ])
-
-                console.log(
-                  "[subscriptions] Created reservation for line item",
-                  item.id,
-                  "inventory_item",
-                  inventoryItemId,
-                  "location",
-                  SUBSCRIPTIONS_STOCK_LOCATION_ID
-                )
-              } catch (lineErr) {
-                console.warn(
-                  "[subscriptions] Failed to reserve inventory for line item",
-                  {
-                    line_item_id: item.id,
-                    variant_id: item.variant_id,
-                    error: lineErr,
-                  }
-                )
-              }
-            }
-          }
-        } catch (reserveErr) {
-          console.warn(
-            "[subscriptions] Failed to create inventory reservation for subscription order",
-            {
-              order_id: createdOrder?.id,
-              error: reserveErr,
-            }
-          )
-        }
-
-        // 5) Mark order as paid (Stripe already charged)
-        try {
-          const orderTotal =
-            createdOrder?.total ?? createdOrder?.subtotal ?? unitPrice
-
-          if (orderTotal != null && createdOrder?.id) {
-            await orderModule.updateOrders(
-              { id: createdOrder.id },
-              {
-                paid_total: orderTotal,
-                payment_status: "captured",
-              }
-            )
-            console.log(
-              "[subscriptions] Marked order as paid",
-              createdOrder.id,
-              "paid_total",
-              orderTotal
-            )
-          } else {
-            console.warn(
-              "[subscriptions] Could not mark order as paid – missing total or id",
-              {
-                order_id: createdOrder?.id,
-                order_total: orderTotal,
-              }
-            )
-          }
-        } catch (markPaidErr) {
-          console.warn(
-            "[subscriptions] Failed to mark order as paid",
-            createdOrder?.id,
-            markPaidErr
-          )
-        }
       } catch (err) {
         console.error(
-          "[subscriptions] Failed to create order from subscription",
+          "[subscriptions] Failed to create order via cart workflow",
           sub.id,
           "invoice",
           invoiceAny.id,
@@ -769,7 +676,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         )
       }
 
-      // 6) Update subscription regardless of whether order succeeded
+      // 7) Update subscription regardless of whether order succeeded
       await subscriptionModuleService.updateSubscriptions(
         { id: sub.id },
         {
