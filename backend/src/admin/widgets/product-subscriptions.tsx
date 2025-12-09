@@ -85,7 +85,7 @@ const ProductSubscriptionsWidget = ({
             payment_link_url: paymentLinkUrl,
             active: true,
             unit_amount: priceAmount
-              ? Math.round(parseFloat(priceAmount) * 100) // dollars → cents
+              ? Math.round(parseFloat(priceAmount)) // dollars → cents
               : undefined,
             currency: priceCurrency || undefined,
           },
@@ -205,7 +205,7 @@ const ProductSubscriptionsWidget = ({
                     {plan.unit_amount != null && plan.currency && (
                       <Text className="text-xs text-ui-fg-subtle">
                         <span className="font-medium">Price:</span>{" "}
-                        {(plan.unit_amount / 100).toFixed(2)}{" "}
+                        {(plan.unit_amount).toFixed(2)}{" "}
                         {plan.currency.toUpperCase()}
                       </Text>
                     )}

@@ -1,6 +1,7 @@
 import { getProductsById } from "@lib/data/products"
 import { HttpTypes } from "@medusajs/types"
 import ProductActions from "@modules/products/components/product-actions"
+import type { SubscriptionPlan } from "@lib/data/products" // 👈 add this
 
 /**
  * Fetches real time pricing for a product and renders the product actions component.
@@ -8,9 +9,11 @@ import ProductActions from "@modules/products/components/product-actions"
 export default async function ProductActionsWrapper({
   id,
   region,
+  subscriptionPlans,                      // 👈 accept plans
 }: {
   id: string
   region: HttpTypes.StoreRegion
+  subscriptionPlans?: SubscriptionPlan[]  // 👈 typed prop
 }) {
   const [product] = await getProductsById({
     ids: [id],
@@ -21,5 +24,11 @@ export default async function ProductActionsWrapper({
     return null
   }
 
-  return <ProductActions product={product} region={region} />
+  return (
+    <ProductActions
+      product={product}
+      region={region}
+      subscriptionPlans={subscriptionPlans}  // 👈 pass them down
+    />
+  )
 }

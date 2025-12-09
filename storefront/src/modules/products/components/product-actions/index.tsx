@@ -14,10 +14,21 @@ import ProductPrice from "../product-price"
 import { addToCart } from "@lib/data/cart"
 import { HttpTypes } from "@medusajs/types"
 
+type SubscriptionPlan = {
+  id: string
+  name: string
+  interval: "day" | "week" | "month" | "year" | null
+  interval_count: number | null
+  unit_amount: number | null // cents
+  currency: string | null    // "usd", "cad", ...
+  payment_link_url: string | null
+}
+
 type ProductActionsProps = {
   product: HttpTypes.StoreProduct
   region: HttpTypes.StoreRegion
   disabled?: boolean
+  subscriptionPlans?: SubscriptionPlan[]  // 👈 add this
 }
 
 const optionsAsKeymap = (variantOptions: any) => {
@@ -28,11 +39,30 @@ const optionsAsKeymap = (variantOptions: any) => {
     return acc
   }, {})
 }
+const formatInterval = (
+  interval: SubscriptionPlan["interval"],
+  count: SubscriptionPlan["interval_count"]
+) => {
+  if (!interval) return "Recurring"
+  const n = count ?? 1
+  const unit = n === 1 ? interval : `${interval}s`
+  return `Every ${n} ${unit}`
+}
 
+const formatPlanPrice = (plan: SubscriptionPlan, region: HttpTypes.StoreRegion) => {
+  if (plan.unit_amount == null) return ""
+  const currency = (plan.currency ?? region.currency_code ?? "usd").toUpperCase()
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency,
+  }).format(plan.unit_amount / 100)
+}
 export default function ProductActions({
   product,
   region,
   disabled,
+  subscriptionPlans,
 }: ProductActionsProps) {
   const [options, setOptions] = useState<Record<string, string | undefined>>({})
   const [isAdding, setIsAdding] = useState(false)
@@ -135,6 +165,8 @@ export default function ProductActions({
 
         <ProductPrice product={product} variant={selectedVariant} />
 
+           <ProductPrice product={product} variant={selectedVariant} />
+
         <Button
           onClick={handleAddToCart}
           disabled={!inStock || !selectedVariant || !!disabled || isAdding}
@@ -149,6 +181,59 @@ export default function ProductActions({
             ? "Out of stock"
             : "Add to cart"}
         </Button>
+
+        {/* 👇 Subscription plans section */}
+        {subscriptionPlans && subscriptionPlans.length > 0 && (
+          <div className="mt-6 space-y-3">
+            <h3 className="text-sm font-semibold">
+              Subscribe &amp; save
+            </h3>
+
+            <div className="flex flex-col gap-3">
+              {subscriptionPlans.map((plan) => (
+                <div
+                  key={plan.id}
+                  className="flex items-center justify-between rounded-md border px-3 py-2"
+                >
+                  <div className="flex flex-col">
+                    <span className="text-sm font-medium">
+                      {plan.name}
+                    </span>
+                    <span className="text-xs text-gray-600">
+                      {formatInterval(plan.interval, plan.interval_count)}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {plan.unit_amount != null && (
+                      <span className="text-sm font-semibold">
+                        {formatPlanPrice(plan, region)}
+                      </span>
+                    )}
+
+                    {plan.payment_link_url && (
+                      <Button
+                        size="small"
+                        variant="secondary"
+                        className="whitespace-nowrap"
+                        asChild
+                      >
+                        <a
+                          href={plan.payment_link_url}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Subscribe
+                        </a>
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <MobileActions
           product={product}
           variant={selectedVariant}

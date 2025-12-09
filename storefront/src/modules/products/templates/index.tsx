@@ -10,17 +10,20 @@ import SkeletonRelatedProducts from "@modules/skeletons/templates/skeleton-relat
 import { notFound } from "next/navigation"
 import ProductActionsWrapper from "./product-actions-wrapper"
 import { HttpTypes } from "@medusajs/types"
-
+import type { SubscriptionPlan } from "@lib/data/products" 
 type ProductTemplateProps = {
   product: HttpTypes.StoreProduct
   region: HttpTypes.StoreRegion
   countryCode: string
+  subscriptionPlans?: SubscriptionPlan[] 
 }
 
 const ProductTemplate: React.FC<ProductTemplateProps> = ({
   product,
   region,
   countryCode,
+  subscriptionPlans,
+  
 }) => {
   if (!product || !product.id) {
     return notFound()
@@ -47,10 +50,11 @@ const ProductTemplate: React.FC<ProductTemplateProps> = ({
                 disabled={true}
                 product={product}
                 region={region}
+                subscriptionPlans={subscriptionPlans} 
               />
             }
           >
-            <ProductActionsWrapper id={product.id} region={region} />
+            <ProductActionsWrapper id={product.id} region={region}  subscriptionPlans={subscriptionPlans}/>
           </Suspense>
         </div>
       </div>

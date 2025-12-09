@@ -3,7 +3,7 @@ import { notFound } from "next/navigation"
 
 import ProductTemplate from "@modules/products/templates"
 import { getRegion, listRegions } from "@lib/data/regions"
-import { getProductByHandle, getProductsList } from "@lib/data/products"
+import { getProductByHandle, getProductsList, getSubscriptionPlansForProduct } from "@lib/data/products"
 
 type Props = {
   params: { countryCode: string; handle: string }
@@ -66,7 +66,6 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
     },
   }
 }
-
 export default async function ProductPage({ params }: Props) {
   const region = await getRegion(params.countryCode)
 
@@ -79,11 +78,15 @@ export default async function ProductPage({ params }: Props) {
     notFound()
   }
 
+  // 👇 Fetch subscription plans for this product
+  const subscriptionPlans = await getSubscriptionPlansForProduct(pricedProduct.id)
+
   return (
     <ProductTemplate
       product={pricedProduct}
       region={region}
       countryCode={params.countryCode}
+      subscriptionPlans={subscriptionPlans} // 👈 pass them down
     />
   )
 }

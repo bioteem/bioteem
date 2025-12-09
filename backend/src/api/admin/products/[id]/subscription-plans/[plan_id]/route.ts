@@ -14,3 +14,17 @@ export const DELETE = async (req: MedusaRequest, res: MedusaResponse) => {
 
   return res.status(204).send()
 }
+
+export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
+  const { id: productId } = req.params
+
+  const subscriptionModuleService =
+    req.scope.resolve<SubscriptionModuleService>(SUBSCRIPTION_MODULE)
+
+  const plans = await subscriptionModuleService.listSubscriptionPlans({
+    product_id: productId,
+    active: true,
+  })
+
+  res.json({ subscription_plans: plans })
+}
