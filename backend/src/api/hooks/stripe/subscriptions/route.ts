@@ -705,76 +705,86 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
                 "allow_backorder",
                 "inventory_items.id",
                 "inventory_items.required_quantity",
-                "inventory_items.location_levels.location_id",
               ],
               filters: { id: variantId },
             })
 
             const variant = variants?.[0]
 
-            if (!variant) {
-              console.warn(
-                "[subscriptions] Could not load variant for reservations",
-                { variant_id: variantId }
-              )
-            } else if (!variant.manage_inventory) {
-              console.log(
-                "[subscriptions] Variant manage_inventory=false, not reserving",
-                { variant_id: variantId }
-              )
-            } else if (
-              !variant.inventory_items ||
-              !variant.inventory_items.length
-            ) {
-              console.warn(
-                "[subscriptions] Variant has no inventory_items, cannot reserve",
-                { variant_id: variantId }
-              )
-            } else {
-              const invItem = variant.inventory_items[0]
-              const locationLevel =
-                invItem.location_levels && invItem.location_levels[0]
+if (!variant) {
+  console.warn(
+    "[subscriptions] Could not load variant for reservations",
+    { variant_id: variantId }
+  )
+} else if (!variant.manage_inventory) {
+  console.log(
+    "[subscriptions] Variant manage_inventory=false, not reserving",
+    { variant_id: variantId }
+  )
+} else if (!variant.inventory_items || !variant.inventory_items.length) {
+  console.warn(
+    "[subscriptions] Variant has no inventory_items, cannot reserve",
+    { variant_id: variantId }
+  )
+} else {
+  const invItem = variant.inventory_items[0]
+  const inventoryItemId = invItem.id
+  const qty = orderItem.quantity ?? 1
+  const requiredQty = invItem.required_quantity ?? 1
+  const allowBackorder = !!variant.allow_backorder
 
-              if (!locationLevel?.location_id) {
-                console.warn(
-                  "[subscriptions] Inventory item has no stock locations, cannot reserve",
-                  {
-                    variant_id: variantId,
-                    inventory_item_id: invItem.id,
-                  }
-                )
-              } else {
-                const inventoryItemId = invItem.id
-                const locationId = locationLevel.location_id
-                const qty = orderItem.quantity ?? 1
-                const requiredQty = invItem.required_quantity ?? 1
-                const allowBackorder = !!variant.allow_backorder
+  // 🔍 Ask the Inventory module for levels to get a location_id
+  const [levels] = await inventoryService.listInventoryLevels({
+    inventory_item_id: [inventoryItemId],
+  })
 
-                await locking.execute([inventoryItemId], async () => {
-                  await inventoryService.createReservationItems([
-                    {
-                      line_item_id: orderItem.id,
-                      inventory_item_id: inventoryItemId,
-                      quantity: requiredQty * qty,
-                      allow_backorder: allowBackorder,
-                      location_id: locationId,
-                    },
-                  ])
-                })
+  if (!levels || !levels.length) {
+    console.warn(
+      "[subscriptions] No inventory levels found for inventory item, cannot reserve",
+      {
+        variant_id: variantId,
+        inventory_item_id: inventoryItemId,
+      }
+    )
+  } else {
+    const locationId = levels[0].location_id
 
-                console.log(
-                  "[subscriptions] Created inventory reservation for subscription order",
-                  {
-                    order_id: createdOrder.id,
-                    line_item_id: orderItem.id,
-                    inventory_item_id: inventoryItemId,
-                    location_id: locationId,
-                    quantity: requiredQty * qty,
-                  }
-                )
-              }
-            }
-          }
+    if (!locationId) {
+      console.warn(
+        "[subscriptions] Inventory level has no location_id, cannot reserve",
+        {
+          variant_id: variantId,
+          inventory_item_id: inventoryItemId,
+          level_id: levels[0].id,
+        }
+      )
+    } else {
+      await locking.execute([inventoryItemId], async () => {
+        await inventoryService.createReservationItems([
+          {
+            line_item_id: orderItem.id,
+            inventory_item_id: inventoryItemId,
+            quantity: requiredQty * qty,
+            allow_backorder: allowBackorder,
+            location_id: locationId,
+          },
+        ])
+      })
+
+      console.log(
+        "[subscriptions] Created inventory reservation for subscription order",
+        {
+          order_id: createdOrder.id,
+          line_item_id: orderItem.id,
+          inventory_item_id: inventoryItemId,
+          location_id: locationId,
+          quantity: requiredQty * qty,
+        }
+      )
+    }
+  }
+}
+}
         } catch (reservationErr) {
           console.warn(
             "[subscriptions] Failed to create inventory reservation for subscription order",
