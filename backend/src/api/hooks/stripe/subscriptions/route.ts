@@ -6,13 +6,20 @@ import { SUBSCRIPTION_MODULE } from "../../../../modules/subscription"
 import { Modules } from "@medusajs/framework/utils"
 import type { ICustomerModuleService } from "@medusajs/framework/types"
 
-const stripe = new Stripe(process.env.STRIPE_API_KEY!)
+const stripe = new Stripe(process.env.STRIPE_API_KEY!, {
+  // @ts-ignore – keep default API version if not set
+  apiVersion: process.env.STRIPE_API_VERSION as any,
+})
 
-// Optional fallbacks – set these in Railway if you want
+// Optional fallbacks / config – set these in Railway
 const SUBSCRIPTIONS_SALES_CHANNEL_ID =
   process.env.SUBSCRIPTIONS_SALES_CHANNEL_ID || undefined
 const SUBSCRIPTIONS_REGION_ID =
   process.env.SUBSCRIPTIONS_REGION_ID || undefined
+const SUBSCRIPTIONS_SHIPPING_OPTION_ID =
+  process.env.SUBSCRIPTIONS_SHIPPING_OPTION_ID || undefined
+const SUBSCRIPTIONS_STOCK_LOCATION_ID =
+  process.env.SUBSCRIPTIONS_STOCK_LOCATION_ID || undefined
 
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   const sig = req.headers["stripe-signature"] as string | undefined
@@ -28,7 +35,6 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   let event: Stripe.Event
 
   if (req.rawBody) {
-    // Preferred: verify signature using raw body
     try {
       event = stripe.webhooks.constructEvent(req.rawBody, sig, webhookSecret)
     } catch (err: any) {
@@ -39,7 +45,6 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       return res.status(400).send(`Webhook Error: ${err.message}`)
     }
   } else {
-    // Fallback: no raw body, skip signature verification
     console.warn(
       "[subscriptions] rawBody missing, falling back to parsed body without signature verification"
     )
@@ -151,7 +156,6 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         stripeCustomerId,
       })
 
-      // Load Stripe subscription to map to our plan
       const stripeSub = (await stripe.subscriptions.retrieve(
         stripeSubId
       )) as any
@@ -189,7 +193,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         product_id: plan.product_id,
       })
 
-      // Idempotency: if subscription already exists, skip
+      // Idempotency
       const [existingSub] = await subscriptionModuleService.listSubscriptions({
         stripe_subscription_id: stripeSub.id,
       })
@@ -202,7 +206,6 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         break
       }
 
-      // Shipping snapshot
       const addr = shippingDetails?.address || customerDetails?.address || null
 
       const subscription = await subscriptionModuleService.createSubscriptions({
@@ -259,17 +262,14 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         break
       }
 
-      // Idempotency
-      {
-        const [existingSub] = await subscriptionModuleService.listSubscriptions({
-          stripe_subscription_id: stripeSub.id,
-        })
-        if (existingSub) {
-          console.log(
-            "[subscriptions] customer.subscription.created: subscription already exists, skipping"
-          )
-          break
-        }
+      const [existingSub] = await subscriptionModuleService.listSubscriptions({
+        stripe_subscription_id: stripeSub.id,
+      })
+      if (existingSub) {
+        console.log(
+          "[subscriptions] customer.subscription.created: subscription already exists, skipping"
+        )
+        break
       }
 
       const stripeCustomer = (await stripe.customers.retrieve(
@@ -369,7 +369,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     }
 
     //
-    // 3) INVOICE PAYMENT SUCCEEDED → create order for that cycle
+    // 3) INVOICE PAYMENT SUCCEEDED → create + reserve order for that cycle
     //
     case "invoice.payment_succeeded": {
       const invoiceAny = event.data.object as any
@@ -382,7 +382,6 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         break
       }
 
-      // Find subscription id on the Stripe invoice
       let stripeSubId: string | null =
         (invoiceAny.subscription as string | null) ?? null
 
@@ -403,7 +402,6 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         break
       }
 
-      // Find our local subscription
       const [sub] = await subscriptionModuleService.listSubscriptions({
         stripe_subscription_id: stripeSubId,
       })
@@ -416,7 +414,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         break
       }
 
-      // Idempotency: already processed this invoice?
+      // Idempotency
       if (sub.stripe_latest_invoice_id === invoiceAny.id && sub.last_order_id) {
         console.log(
           "[subscriptions] Invoice already processed for subscription",
@@ -427,7 +425,6 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         break
       }
 
-      // Load plan (so we know which product to attach)
       const [plan] = await subscriptionModuleService.listSubscriptionPlans({
         id: sub.plan_id,
       })
@@ -445,20 +442,18 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         product_id: plan.product_id,
       })
 
-      const line = invoiceAny.lines?.data?.[0]
-      const period = line?.period
+      const firstLine = invoiceAny.lines?.data?.[0]
+      const period = firstLine?.period
 
-      //
-      // PRICE: use Stripe’s line price (cents) → convert to Medusa major units
-      //
+      // Price from Stripe (cents → major)
       let stripeUnitAmountCents: number | null =
-        line?.price?.unit_amount ?? null
+        firstLine?.price?.unit_amount ?? null
 
       if (
         stripeUnitAmountCents == null &&
         typeof invoiceAny.amount_paid === "number"
       ) {
-        const qty = line?.quantity ?? 1
+        const qty = firstLine?.quantity ?? 1
         stripeUnitAmountCents = Math.round(invoiceAny.amount_paid / qty)
       }
 
@@ -470,34 +465,46 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         break
       }
 
-      // Medusa order amounts appear to be in MAJOR units → divide by 100
       const unitPrice = Math.round(stripeUnitAmountCents / 100)
       const currency = (invoiceAny.currency as string).toLowerCase()
 
       let createdOrder: any | null = null
-      let variantId: string | undefined
 
       try {
         const orderModule = req.scope.resolve<any>(Modules.ORDER)
         const productModule = req.scope.resolve<any>(Modules.PRODUCT)
         const regionModule = req.scope.resolve<any>(Modules.REGION)
+        const inventoryModule = req.scope.resolve<any>(Modules.INVENTORY)
 
-        // 1) Load product with variants
+        if (!SUBSCRIPTIONS_STOCK_LOCATION_ID) {
+          console.warn(
+            "[subscriptions] SUBSCRIPTIONS_STOCK_LOCATION_ID not set – reservations will not be created"
+          )
+        }
+
+        if (!SUBSCRIPTIONS_SHIPPING_OPTION_ID) {
+          console.warn(
+            "[subscriptions] SUBSCRIPTIONS_SHIPPING_OPTION_ID not set – orders will have no shipping method"
+          )
+        }
+
+        // 1) Load product with variants + sales channels
         const product = await productModule.retrieveProduct(plan.product_id, {
-          relations: ["variants"],
+          relations: ["variants", "sales_channels"],
         })
 
-        console.log("[subscriptions] Loaded product for plan", {
-          product_id: plan.product_id,
-          title: product?.title,
-          variants_count: Array.isArray(product?.variants)
-            ? product.variants.length
-            : "n/a",
-        })
+        if (!product) {
+          throw new Error(
+            `Could not retrieve product ${plan.product_id} for subscription plan`
+          )
+        }
 
-        let lineTitle = product?.title || "Subscription order"
+        let variantId: string | undefined
+        let salesChannelId: string | undefined
+        let regionId: string | undefined
+        let lineTitle = product.title || "Subscription order"
 
-        if (Array.isArray(product?.variants) && product.variants.length > 0) {
+        if (Array.isArray(product.variants) && product.variants.length > 0) {
           variantId = product.variants[0].id
         } else {
           throw new Error(
@@ -505,40 +512,31 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           )
         }
 
-        // 2) Sales channel
-        let salesChannelId: string | undefined
-
         if (
-          Array.isArray(product?.sales_channels) &&
+          Array.isArray(product.sales_channels) &&
           product.sales_channels.length > 0
         ) {
           salesChannelId = product.sales_channels[0].id
-        }
-
-        if (!salesChannelId && SUBSCRIPTIONS_SALES_CHANNEL_ID) {
+        } else if (SUBSCRIPTIONS_SALES_CHANNEL_ID) {
           salesChannelId = SUBSCRIPTIONS_SALES_CHANNEL_ID
           console.log(
             "[subscriptions] Using fallback sales channel",
             salesChannelId
           )
-        }
-
-        if (!salesChannelId) {
+        } else {
           throw new Error(
-            "No sales channel found – set SUBSCRIPTIONS_SALES_CHANNEL_ID or attach product to a sales channel"
+            "No sales channel found – attach product to a sales channel or set SUBSCRIPTIONS_SALES_CHANNEL_ID"
           )
         }
 
-        // 3) Resolve region by shipping country
+        // 2) Resolve region by shipping country with fallbacks
         const countryCode = sub.shipping_country?.toLowerCase()
-        let regionId: string | undefined
 
         if (countryCode) {
           const regions = await regionModule.listRegions({
             countries: { iso_2: countryCode },
           })
-
-          if (regions && regions.length > 0) {
+          if (regions?.length) {
             regionId = regions[0].id
             console.log(
               "[subscriptions] Found region for country",
@@ -549,19 +547,19 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           }
         }
 
+        if (!regionId && SUBSCRIPTIONS_REGION_ID) {
+          regionId = SUBSCRIPTIONS_REGION_ID
+          console.log("[subscriptions] Using fallback region", regionId)
+        }
+
         if (!regionId) {
-          if (SUBSCRIPTIONS_REGION_ID) {
-            regionId = SUBSCRIPTIONS_REGION_ID
-            console.log("[subscriptions] Using fallback region", regionId)
-          } else {
-            const allRegions = await regionModule.listRegions({ take: 1 })
-            if (allRegions && allRegions.length > 0) {
-              regionId = allRegions[0].id
-              console.log(
-                "[subscriptions] Using first available region",
-                regionId
-              )
-            }
+          const allRegions = await regionModule.listRegions({ take: 1 })
+          if (allRegions?.length) {
+            regionId = allRegions[0].id
+            console.log(
+              "[subscriptions] Using first available region",
+              regionId
+            )
           }
         }
 
@@ -571,25 +569,12 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           )
         }
 
-        // Country code must be 2-char ISO
         let validCountryCode = countryCode
         if (!validCountryCode || validCountryCode.length !== 2) {
           validCountryCode = "us"
         }
 
-        console.log("[subscriptions] Building orderInput", {
-          customer_id: sub.customer_id,
-          email: sub.billing_email,
-          currency,
-          region_id: regionId,
-          sales_channel_id: salesChannelId,
-          product_id: plan.product_id,
-          variant_id: variantId,
-          unit_price: unitPrice,
-          country_code: validCountryCode,
-        })
-
-        // 4) Build order payload
+        // 3) Build order payload (with free shipping method)
         const orderInput: any = {
           customer_id: sub.customer_id,
           email: sub.billing_email ?? undefined,
@@ -603,7 +588,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
               product_id: plan.product_id,
               variant_id: variantId,
               quantity: 1,
-              unit_price: unitPrice, // major units, not cents
+              unit_price: unitPrice,
             },
           ],
 
@@ -618,6 +603,15 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
             postal_code: sub.shipping_postal_code ?? undefined,
             country_code: validCountryCode,
           },
+
+          ...(SUBSCRIPTIONS_SHIPPING_OPTION_ID && {
+            shipping_methods: [
+              {
+                shipping_option_id: SUBSCRIPTIONS_SHIPPING_OPTION_ID,
+                amount: 0, // free shipping for subscriptions
+              },
+            ],
+          }),
 
           metadata: {
             subscription_id: sub.id,
@@ -645,7 +639,70 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           invoiceAny.id
         )
 
-        // 5) Mark order as paid (since Stripe already charged)
+        // 4) Create inventory reservations for each line item (if configured)
+        try {
+          if (!SUBSCRIPTIONS_STOCK_LOCATION_ID) {
+            console.warn(
+              "[subscriptions] Skipping reservation – no SUBSCRIPTIONS_STOCK_LOCATION_ID env set"
+            )
+          } else if (Array.isArray(createdOrder?.items)) {
+            for (const item of createdOrder.items) {
+              if (!item.variant_id) {
+                console.warn(
+                  "[subscriptions] Line item has no variant_id, cannot reserve",
+                  { line_item_id: item.id }
+                )
+                continue
+              }
+
+              const inventoryItems = await inventoryModule.listInventoryItems({
+                variant_id: [item.variant_id],
+              })
+
+              const inventoryItem = inventoryItems?.[0]
+
+              if (!inventoryItem) {
+                console.warn(
+                  "[subscriptions] No inventory_item found for variant, cannot reserve",
+                  {
+                    variant_id: item.variant_id,
+                    line_item_id: item.id,
+                  }
+                )
+                continue
+              }
+
+              await inventoryModule.createReservationItems([
+                {
+                  inventory_item_id: inventoryItem.id,
+                  location_id: SUBSCRIPTIONS_STOCK_LOCATION_ID,
+                  quantity: item.quantity ?? 1,
+                  line_item_id: item.id,
+                  description: "Subscription cycle auto-reservation",
+                },
+              ])
+
+              console.log(
+                "[subscriptions] Created reservation for line item",
+                item.id,
+                "inventory_item",
+                inventoryItem.id,
+                "location",
+                SUBSCRIPTIONS_STOCK_LOCATION_ID
+              )
+            }
+          }
+        } catch (reserveErr) {
+          console.warn(
+            "[subscriptions] Failed to create inventory reservation for subscription order",
+            {
+              order_id: createdOrder?.id,
+              error: reserveErr,
+            }
+          )
+        }
+
+        // 5) Mark order as paid (Stripe already charged)
         try {
           const orderTotal =
             createdOrder?.total ?? createdOrder?.subtotal ?? unitPrice
@@ -680,118 +737,6 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
             markPaidErr
           )
         }
-
-        //
-        // 6) 🔐 Create inventory reservation so fulfillment works
-        //
-        try {
-          const query = req.scope.resolve<any>("query")
-          const inventoryService = req.scope.resolve<any>(Modules.INVENTORY)
-          const locking = req.scope.resolve<any>(Modules.LOCKING)
-
-          const orderItem = createdOrder?.items?.[0]
-
-          if (!orderItem || !variantId) {
-            console.log(
-              "[subscriptions] No order item or variantId, skipping reservations"
-            )
-          } else {
-            // Load variant + inventory item + location levels
-            const { data: variants } = await query.graph({
-              entity: "product_variant",
-              fields: [
-                "id",
-                "manage_inventory",
-                "allow_backorder",
-                "inventory_items.id",
-                "inventory_items.required_quantity",
-              ],
-              filters: { id: variantId },
-            })
-
-            const variant = variants?.[0]
-
-if (!variant) {
-  console.warn(
-    "[subscriptions] Could not load variant for reservations",
-    { variant_id: variantId }
-  )
-} else if (!variant.manage_inventory) {
-  console.log(
-    "[subscriptions] Variant manage_inventory=false, not reserving",
-    { variant_id: variantId }
-  )
-} else if (!variant.inventory_items || !variant.inventory_items.length) {
-  console.warn(
-    "[subscriptions] Variant has no inventory_items, cannot reserve",
-    { variant_id: variantId }
-  )
-} else {
-  const invItem = variant.inventory_items[0]
-  const inventoryItemId = invItem.id
-  const qty = orderItem.quantity ?? 1
-  const requiredQty = invItem.required_quantity ?? 1
-  const allowBackorder = !!variant.allow_backorder
-
- // 🔍 Ask the Inventory module for levels to get a location_id
-const levels = await inventoryService.listInventoryLevels({
-  inventory_item_id: [inventoryItemId],
-})
-
-if (!levels || levels.length === 0) {
-  console.warn(
-    "[subscriptions] No inventory levels found for inventory item, cannot reserve",
-    {
-      inventory_item_id: inventoryItemId,
-      variant_id: variantId,
-    }
-  )
-} else {
-  const level = levels[0]
-  const locationId = level.location_id
-
-  if (!locationId) {
-    console.warn(
-      "[subscriptions] Inventory level has no location_id, cannot reserve",
-      {
-        variant_id: variantId,
-        inventory_item_id: inventoryItemId,
-        level_id: level.id,
-      }
-    )
-  } else {
-    await locking.execute([inventoryItemId], async () => {
-      await inventoryService.createReservationItems([
-        {
-          line_item_id: orderItem.id,
-          inventory_item_id: inventoryItemId,
-          quantity: requiredQty * qty,
-          allow_backorder: allowBackorder,
-          location_id: locationId,
-        },
-      ])
-    })
-
-    console.log(
-      "[subscriptions] Created inventory reservation for subscription order",
-      {
-        order_id: createdOrder.id,
-        line_item_id: orderItem.id,
-        inventory_item_id: inventoryItemId,
-        location_id: locationId,
-        quantity: requiredQty * qty,
-      }
-    )
-  }
-}
-}
-}
-        } catch (reservationErr) {
-          console.warn(
-            "[subscriptions] Failed to create inventory reservation for subscription order",
-            reservationErr
-          )
-        }
       } catch (err) {
         console.error(
           "[subscriptions] Failed to create order from subscription",
@@ -802,7 +747,7 @@ if (!levels || levels.length === 0) {
         )
       }
 
-      // Update subscription regardless of whether order succeeded
+      // 6) Update subscription regardless of whether order succeeded
       await subscriptionModuleService.updateSubscriptions(
         { id: sub.id },
         {
