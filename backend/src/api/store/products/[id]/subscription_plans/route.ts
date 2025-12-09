@@ -1,7 +1,7 @@
 // src/api/store/products/[id]/subscription-plans/route.ts
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
-import SubscriptionModuleService from "../../../../../../modules/subscription/service"
-import { SUBSCRIPTION_MODULE } from "../../../../../../modules/subscription"
+import SubscriptionModuleService from "../../../../../modules/subscription/service"
+import { SUBSCRIPTION_MODULE } from "../../../../../modules/subscription"
 
 export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
   const { id: productId } = req.params

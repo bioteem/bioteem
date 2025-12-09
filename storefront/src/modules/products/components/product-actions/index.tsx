@@ -165,8 +165,6 @@ export default function ProductActions({
 
         <ProductPrice product={product} variant={selectedVariant} />
 
-           <ProductPrice product={product} variant={selectedVariant} />
-
         <Button
           onClick={handleAddToCart}
           disabled={!inStock || !selectedVariant || !!disabled || isAdding}
