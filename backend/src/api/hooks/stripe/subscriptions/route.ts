@@ -3,7 +3,7 @@ import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import Stripe from "stripe"
 import SubscriptionModuleService from "../../../../modules/subscription/service"
 import { SUBSCRIPTION_MODULE } from "../../../../modules/subscription"
-import { Modules } from "@medusajs/framework/utils"
+import { Modules, ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import type { ICustomerModuleService } from "@medusajs/framework/types"
 
 const stripe = new Stripe(process.env.STRIPE_API_KEY!, {
@@ -490,11 +490,8 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
 
         // 1) Load product with variants (no sales_channels relation)
         const product = await productModule.retrieveProduct(plan.product_id, {
-  relations: ["variants", "variants.inventory_items"],
+  relations: ["variants"],
 })
-const variantMap = new Map(
-  (product.variants || []).map((v: any) => [v.id, v])
-)
 
         if (!product) {
           throw new Error(
@@ -634,8 +631,8 @@ const variantMap = new Map(
           "invoice",
           invoiceAny.id
         )
-
-        // 4) Create inventory reservations for each line item (if configured)
+const query = req.scope.resolve(ContainerRegistrationKeys.QUERY)
+          // 4) Create inventory reservations for each line item (if configured)
         try {
           if (!SUBSCRIPTIONS_STOCK_LOCATION_ID) {
             console.warn(
@@ -651,46 +648,64 @@ const variantMap = new Map(
                 continue
               }
 
-const variant = variantMap.get(item.variant_id)
+              try {
+                // Use module link: variant -> inventory_items
+                const { data: variants } = await query.graph({
+                  entity: "variant",
+                  fields: ["id", "inventory_items.id"],
+                  filters: { id: item.variant_id },
+                })
 
-if (!variant) {
-  console.warn(
-    "[subscriptions] Could not find variant on product for line item, cannot reserve",
-    { variant_id: item.variant_id, line_item_id: item.id }
-  )
-  continue
-}
+                const variant = variants?.[0]
 
-const invItems = (variant as any).inventory_items || []
+                if (!variant) {
+                  console.warn(
+                    "[subscriptions] No variant found via query.graph, cannot reserve",
+                    { variant_id: item.variant_id, line_item_id: item.id }
+                  )
+                  continue
+                }
 
-if (!invItems.length) {
-  console.warn(
-    "[subscriptions] Variant has no inventory_items, cannot reserve",
-    { variant_id: item.variant_id, line_item_id: item.id }
-  )
-  continue
-}
+                const invItems = (variant as any).inventory_items || []
 
-const inventoryItemId = invItems[0].id
+                if (!invItems.length) {
+                  console.warn(
+                    "[subscriptions] Variant has no inventory_items, cannot reserve",
+                    { variant_id: item.variant_id, line_item_id: item.id }
+                  )
+                  continue
+                }
 
-await inventoryModule.createReservationItems([
-  {
-    inventory_item_id: inventoryItemId,
-    location_id: SUBSCRIPTIONS_STOCK_LOCATION_ID,
-    quantity: item.quantity ?? 1,
-    line_item_id: item.id,
-    description: "Subscription cycle auto-reservation",
-  },
-])
+                const inventoryItemId = invItems[0].id
 
-             console.log(
-  "[subscriptions] Created reservation for line item",
-  item.id,
-  "inventory_item",
-  inventoryItemId,
-  "location",
-  SUBSCRIPTIONS_STOCK_LOCATION_ID
-)
+                await inventoryModule.createReservationItems([
+                  {
+                    inventory_item_id: inventoryItemId,
+                    location_id: SUBSCRIPTIONS_STOCK_LOCATION_ID,
+                    quantity: item.quantity ?? 1,
+                    line_item_id: item.id,
+                    description: "Subscription cycle auto-reservation",
+                  },
+                ])
+
+                console.log(
+                  "[subscriptions] Created reservation for line item",
+                  item.id,
+                  "inventory_item",
+                  inventoryItemId,
+                  "location",
+                  SUBSCRIPTIONS_STOCK_LOCATION_ID
+                )
+              } catch (lineErr) {
+                console.warn(
+                  "[subscriptions] Failed to reserve inventory for line item",
+                  {
+                    line_item_id: item.id,
+                    variant_id: item.variant_id,
+                    error: lineErr,
+                  }
+                )
+              }
             }
           }
         } catch (reserveErr) {
