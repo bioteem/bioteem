@@ -4,43 +4,42 @@ import Image from "next/image"
 import type { ReactNode } from "react"
 import { Heading } from "@medusajs/ui"
 
+type Variant = "default" | "portrait" | "stacked"
+
 type SplitSectionProps = {
   title: string
   body: string
   imageSrc: string
   imageAlt: string
-  /** If true, image appears on the left on large screens */
+
+  /** Flip order on desktop for split layouts (default/portrait) */
   imageOnLeft?: boolean
-  /** Small label above the title (optional) */
+
   eyebrow?: string
-  /** Optional extra content under the text (buttons, links, etc.) */
   children?: ReactNode
 
-  /**
-   * "center" = your current behavior
-   * "match-image" = image defines height; text column stretches to match image height
-   */
-  layout?: "center" | "match-image"
-
-  imageAspect?: "4/3" | "4/5" | "1/1" | "16/9"
-
-  /** If true, render the body as a styled blockquote */
+  /** Render body as quote */
   blockquote?: boolean
-  /** Optional author line under the quoted body */
   quoteAuthor?: string
+
+  /** Layout style */
+  variant?: Variant
+
+  /** Optional overrides */
+  imageAspect?: "4/3" | "4/5" | "1/1" | "16/9"
+  imageMaxWidth?: number // only used in portrait variant (px)
+  tight?: boolean // makes spacing closer
 }
 
-const aspectClass: Record<
-  NonNullable<SplitSectionProps["imageAspect"]>,
-  string
-> = {
-  "4/3": "aspect-[4/3]",
-  "4/5": "aspect-[4/5]",
-  "1/1": "aspect-square",
-  "16/9": "aspect-video",
-}
+const aspectClass: Record<NonNullable<SplitSectionProps["imageAspect"]>, string> =
+  {
+    "4/3": "aspect-[4/3]",
+    "4/5": "aspect-[4/5]",
+    "1/1": "aspect-square",
+    "16/9": "aspect-video",
+  }
 
-const SplitSection = ({
+export default function SplitSection({
   title,
   body,
   imageSrc,
@@ -48,11 +47,15 @@ const SplitSection = ({
   imageOnLeft = false,
   eyebrow,
   children,
-  layout = "center",
-  imageAspect = "4/3",
   blockquote = false,
   quoteAuthor,
-}: SplitSectionProps) => {
+  variant = "default",
+  imageAspect,
+  imageMaxWidth = 480,
+  tight = false,
+}: SplitSectionProps) {
+  const spacing = tight ? "gap-6 lg:gap-8" : "gap-10 lg:gap-12"
+
   const bodyBlock = blockquote ? (
     <blockquote className="mt-4 border-l-4 border-[#005198] pl-4">
       <p className="text-sm md:text-base leading-relaxed text-ui-fg-base italic">
@@ -74,7 +77,8 @@ const SplitSection = ({
     <div
       className={[
         "space-y-4",
-        layout === "match-image" ? "h-full flex flex-col justify-center" : "",
+        // In portrait variant, make text match the image height nicely
+        variant === "portrait" ? "h-full flex flex-col justify-center" : "",
       ].join(" ")}
     >
       {eyebrow && (
@@ -96,53 +100,108 @@ const SplitSection = ({
     </div>
   )
 
- const imageBlock = (
-  <div
-    className={[
-      "relative w-full overflow-hidden rounded-3xl bg-ui-bg-subtle",
-      // Mobile/tablet: keep nice aspect ratio
-      "aspect-[4/3]",
-      // Desktop: stop it from becoming huge
-      "lg:aspect-auto lg:h-[520px] xl:h-[580px]",
-    ].join(" ")}
-  >
-    <Image
-      src={imageSrc}
-      alt={imageAlt}
-      fill
-      className="object-cover object-[50%_20%]"
-      sizes="(min-width: 1024px) 540px, 100vw"
-      priority={false}
-    />
-  </div>
-)
+  // --- IMAGE BLOCKS PER VARIANT ---
 
+  // Default: responsive aspect ratio, can get big on desktop but "normal"
+  const defaultImageBlock = (
+    <div
+      className={[
+        "relative w-full overflow-hidden rounded-3xl bg-ui-bg-subtle",
+        aspectClass[imageAspect ?? "4/3"],
+      ].join(" ")}
+    >
+      <Image
+        src={imageSrc}
+        alt={imageAlt}
+        fill
+        className="object-cover"
+        sizes="(min-width: 1024px) 540px, 100vw"
+      />
+    </div>
+  )
+
+  // Portrait: vertical image (4/5 by default) + capped width on desktop
+  const portraitImageBlock = (
+    <div className="w-full lg:flex lg:justify-end">
+      <div
+        className={[
+          "relative w-full overflow-hidden rounded-3xl bg-ui-bg-subtle",
+          aspectClass[imageAspect ?? "4/5"],
+        ].join(" ")}
+        style={{ maxWidth: imageMaxWidth }}
+      >
+        <Image
+          src={imageSrc}
+          alt={imageAlt}
+          fill
+          className="object-cover object-[50%_20%]"
+          sizes={`(min-width: 1024px) ${imageMaxWidth}px, 100vw`}
+        />
+      </div>
+    </div>
+  )
+
+  // Stacked: image on top, text below, even on desktop
+  const stackedImageBlock = (
+    <div
+      className={[
+        "relative w-full overflow-hidden rounded-3xl bg-ui-bg-subtle",
+        aspectClass[imageAspect ?? "16/9"],
+      ].join(" ")}
+    >
+      <Image
+        src={imageSrc}
+        alt={imageAlt}
+        fill
+        className="object-cover"
+        sizes="100vw"
+      />
+    </div>
+  )
+
+  const imageBlock =
+    variant === "portrait"
+      ? portraitImageBlock
+      : variant === "stacked"
+        ? stackedImageBlock
+        : defaultImageBlock
+
+  // --- LAYOUT WRAPPER PER VARIANT ---
+
+  const layoutWrapper =
+    variant === "stacked" ? (
+      <div className={["flex flex-col", spacing].join(" ")}>
+        {imageBlock}
+        {textBlock}
+      </div>
+    ) : (
+      <div
+        className={[
+          "grid w-full grid-cols-1 lg:grid-cols-2",
+          spacing,
+          // portrait: stretch so text can match image height
+          variant === "portrait" ? "lg:items-stretch" : "lg:items-center",
+        ].join(" ")}
+      >
+        {imageOnLeft ? (
+          <>
+            {imageBlock}
+            {textBlock}
+          </>
+        ) : (
+          <>
+            {textBlock}
+            {imageBlock}
+          </>
+        )}
+      </div>
+    )
 
   return (
     <section className="w-full py-12 md:py-16">
       <div className="mx-auto flex max-w-8xl px-4 md:px-6">
-        <div
-  className={[
-    "grid w-full grid-cols-1 gap-10 lg:grid-cols-2",
-    layout === "match-image" ? "lg:items-stretch" : "lg:items-center",
-  ].join(" ")}
->
-
-          {imageOnLeft ? (
-            <>
-              {imageBlock}
-              {textBlock}
-            </>
-          ) : (
-            <>
-              {textBlock}
-              {imageBlock}
-            </>
-          )}
-        </div>
+        {layoutWrapper}
       </div>
     </section>
   )
 }
-
-export default SplitSection

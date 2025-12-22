@@ -56,8 +56,7 @@ const FounderHero: React.FC<FounderHeroProps> = ({
         body={quote}
         imageSrc={imageSrc}
         imageAlt={imageAlt}
-          layout="match-image"
-  imageAspect="4/5"
+          variant="portrait"
   blockquote
   quoteAuthor={`${name}, Founder`}
 

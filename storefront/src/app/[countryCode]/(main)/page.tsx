@@ -39,6 +39,7 @@ export default async function Home({
         body="Designed to nourish your whole body, starting in your gut. We've developed a biological 'onion' (layers of nutrients) powered by over 30 diverse probiotic strains so you get the best results from your supplementation. Better gut health. Better absorption. Better you."
         imageSrc="/assets/products-vt.jpg"
         imageAlt="Lab glassware with capsules"
+        variant="default"
       >
        <CTAButton href="/store" variant="primary">
   Shop Now
@@ -67,6 +68,7 @@ export default async function Home({
 {/* Need to work on making thevideo work through a CDN or a youtube service */}
 
  <SplitSection
+ variant="default"
         eyebrow="Health"
         title="Good for the World, Good for You"
         body="Originally developed to help combat malnutrition in the developing world, this groundbreaking innovation has more than proven its value in North America and beyond. We’re challenging the norms around nutrient absorption and gut health to deliver a product that truly meets your needs."
