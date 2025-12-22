@@ -35,7 +35,7 @@ export default function SplitSection({
   variant = "default",
 }: SplitSectionProps) {
   const spacing =
-    variant === "portrait" ? "gap-4 lg:gap-4" : "gap-8 lg:gap-10"
+    variant === "portrait" ? "gap-6 lg:gap-6" : "gap-8 lg:gap-10"
 
   const bodyBlock = blockquote ? (
     <blockquote className="mt-3 border-l-4 border-[#005198] pl-4">
@@ -69,7 +69,7 @@ export default function SplitSection({
       className={[
         "space-y-4",
         variant === "portrait"
-          ? "max-w-[600px] h-full flex flex-col justify-start lg:pt-10 ml-4"
+          ? "max-w-[800px] h-full flex flex-col justify-start lg:pt-10 lg:pr-6"
           : "",
       ].join(" ")}
     >
@@ -135,7 +135,7 @@ const layoutWrapper =
 
         // ✅ portrait: use content-sized columns and center the whole block
         variant === "portrait"
-          ? "lg:grid-cols-[minmax(0,520px)_420px] lg:justify-center lg:items-start"
+          ? "lg:grid-cols-[minmax(0,800px)_420px] lg:justify-center lg:items-start"
           : "lg:grid-cols-2 lg:items-center",
       ].join(" ")}
     >
