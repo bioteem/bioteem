@@ -24,7 +24,7 @@ const FounderHero: React.FC<FounderHeroProps> = ({
   return (
     <section>
 
-    {/* //   <div className="mx-auto w-full max-w-6xl px-6 py-12 md:py-16">
+    //   <div className="mx-auto w-full max-w-6xl px-6 py-12 md:py-16">
     //     <div className="grid items-center gap-10 md:grid-cols-2">
     //       <div className="order-2 md:order-1">
     //         <p className="text-small-regular text-ui-fg-subtle">{title}</p>
@@ -47,7 +47,7 @@ const FounderHero: React.FC<FounderHeroProps> = ({
     //           Real people. Real science. Real results.
     //         </p>
     //     </div>
-    //   </div> */}
+    //   </div>
 
       <SplitSection
 
