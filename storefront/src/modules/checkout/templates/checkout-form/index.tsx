@@ -18,11 +18,15 @@ export default async function CheckoutForm({
   }
 
   const shippingMethods = await listCartShippingMethods(cart.id)
-  const paymentMethods = await listCartPaymentMethods(cart.region?.id ?? "")
+const paymentMethods = await listCartPaymentMethods(cart.region?.id ?? "")
 
   if (!shippingMethods || !paymentMethods) {
     return null
   }
+
+const visiblePaymentMethods = paymentMethods.filter(
+  (method) => method.id !== "pp_system_default"
+)
 
   return (
     <div>
@@ -36,7 +40,7 @@ export default async function CheckoutForm({
         </div>
 
         <div>
-          <Payment cart={cart} availablePaymentMethods={paymentMethods} />
+          <Payment cart={cart} availablePaymentMethods={visiblePaymentMethods} />
         </div>
 
         <div>

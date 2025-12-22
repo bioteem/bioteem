@@ -16,9 +16,10 @@ export const INGREDIENT_TEMPLATES: Record<IngredientTemplateId, IngredientTempla
     description:
       "A balanced blend designed for daily foundational support.",
     items: [
-      "Lactobacillus rhamnosus – supports overall gut balance",
-      "Bifidobacterium longum – helps maintain a healthy microbiome",
-      "Inulin (prebiotic fiber) – nourishes beneficial bacteria",
+    "Other Ingredients: Active probiotic cultures, DHA algal oil, coconut milk powder, red marine algae, modified cornstarch, natural beet colourant, guar gum, gum arabic, lecithin, strawberry extract, stevia leaf extract",
+
+"Autre Ingrédients: Cultures probiotiques actives, huile d'algue DHA, poudre de lait de coco, algue marine rouge (Lithothamnion calcareum), modifié amidon de maïs, colorant naturel de betterave, gomme guar, gomme arabique, lécithine, extrait de fraise, extrait de feuille de stévia."
+   
     ],
   },
   skin: {
@@ -26,11 +27,9 @@ export const INGREDIENT_TEMPLATES: Record<IngredientTemplateId, IngredientTempla
     description:
       "Formulated to support skin clarity, barrier function, and hydration from within.",
     items: [
-      "Lactobacillus rhamnosus GG – associated with improved skin barrier",
-      "Lactobacillus paracasei – supports skin comfort and resilience",
-      "Zinc – contributes to the maintenance of normal skin",
-      "Vitamin C – supports collagen formation and antioxidant protection",
-    ],
+              "Other Ingredients: Active probiotic cultures, DHA algal oil, coconut milk powder, red marine algae, modified cornstarch, natural beet colourant, guar gum, gum arabic, lecithin, strawberry extract, stevia leaf extract",
+      "Autre Ingrédients: Cultures probiotiques actives, huile d'algue DHA, poudre de lait de coco, algue marine rouge (Lithothamnion calcareum), modifié amidon de maïs, colorant naturel de betterave, gomme guar, gomme arabique, lécithine, extrait de fraise, extrait de feuille de stévia"
+ ],
   },
   gut: {
     title: "Gut Health Blend",
