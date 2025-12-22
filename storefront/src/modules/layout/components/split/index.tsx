@@ -96,32 +96,38 @@ const SplitSection = ({
     </div>
   )
 
-  const imageBlock = (
-    <div
-      className={[
-        "relative w-full overflow-hidden rounded-3xl bg-ui-bg-subtle",
-        aspectClass[imageAspect],
-      ].join(" ")}
-    >
-      <Image
-        src={imageSrc}
-        alt={imageAlt}
-        fill
-        className="object-cover"
-        sizes="(min-width: 1024px) 540px, 100vw"
-      />
-    </div>
-  )
+ const imageBlock = (
+  <div
+    className={[
+      "relative w-full overflow-hidden rounded-3xl bg-ui-bg-subtle",
+      // Mobile/tablet: keep nice aspect ratio
+      "aspect-[4/3]",
+      // Desktop: stop it from becoming huge
+      "lg:aspect-auto lg:h-[520px] xl:h-[580px]",
+    ].join(" ")}
+  >
+    <Image
+      src={imageSrc}
+      alt={imageAlt}
+      fill
+      className="object-cover object-[50%_20%]"
+      sizes="(min-width: 1024px) 540px, 100vw"
+      priority={false}
+    />
+  </div>
+)
+
 
   return (
     <section className="w-full py-12 md:py-16">
       <div className="mx-auto flex max-w-8xl px-4 md:px-6">
         <div
-          className={[
-            "grid w-full grid-cols-1 gap-10 lg:grid-cols-2",
-            layout === "match-image" ? "lg:items-stretch" : "lg:items-center",
-          ].join(" ")}
-        >
+  className={[
+    "grid w-full grid-cols-1 gap-10 lg:grid-cols-2",
+    layout === "match-image" ? "lg:items-stretch" : "lg:items-center",
+  ].join(" ")}
+>
+
           {imageOnLeft ? (
             <>
               {imageBlock}
