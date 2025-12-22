@@ -1,5 +1,6 @@
 import React from "react"
 import { Button } from "@medusajs/ui"
+import Link from "next/link"
 
 type CTAButtonProps = {
   href: string
@@ -23,13 +24,14 @@ const CTAButton = ({
   className = "",
 }: CTAButtonProps & { variant?: Variant }) => {
   return (
+    <Link href={href}>
     <Button
       size={size}
       asChild
       className={`${variantClasses[variant]} ${className}`}
     >
-      <a href={href}>{children}</a>
-    </Button>
+     {children}
+    </Button></Link>
   )
 }
 

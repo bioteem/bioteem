@@ -40,7 +40,7 @@ export default async function Home({
         imageSrc="/assets/products-vt.jpg"
         imageAlt="Lab glassware with capsules"
       >
-       <CTAButton href="/shop" variant="primary">
+       <CTAButton href="/store" variant="primary">
   Shop Now
 </CTAButton>
 
@@ -67,7 +67,6 @@ export default async function Home({
 {/* Need to work on making thevideo work through a CDN or a youtube service */}
 
  <SplitSection
-        imageOnLeft
         eyebrow="Health"
         title="Good for the World, Good for You"
         body="Originally developed to help combat malnutrition in the developing world, this groundbreaking innovation has more than proven its value in North America and beyond. We’re challenging the norms around nutrient absorption and gut health to deliver a product that truly meets your needs."

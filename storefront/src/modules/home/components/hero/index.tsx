@@ -1,6 +1,7 @@
 import Image from "next/image"
 import Link from "next/link"
 import { Button, Heading } from "@medusajs/ui"
+import CTAButton from "@modules/common/components/call-to-action-btn"
 
 const Hero = () => {
   return (
@@ -36,11 +37,10 @@ const Hero = () => {
             </Heading> */}
 
             <div className="mt-4 flex justify-center">
-              <Link href="/store">
-                <Button size="large" className="bg-[#4e7ec7] hover:bg-[#1e55a8] text-white">
-                  Shop now
-                </Button>
-              </Link>
+<CTAButton href="/store" variant="primary">
+  Shop Now
+</CTAButton>
+
             </div>
           </div>
         </div>
