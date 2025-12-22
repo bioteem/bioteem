@@ -22,7 +22,7 @@ const FounderHero: React.FC<FounderHeroProps> = ({
   const [loaded, setLoaded] = React.useState(false)
 
   return (
-    <section className="w-full">
+    <section>
 
     {/* //   <div className="mx-auto w-full max-w-6xl px-6 py-12 md:py-16">
     //     <div className="grid items-center gap-10 md:grid-cols-2">
@@ -56,11 +56,12 @@ const FounderHero: React.FC<FounderHeroProps> = ({
         body={quote}
         imageSrc={imageSrc}
         imageAlt={imageAlt}
+          layout="match-image"
+  imageAspect="4/5"
+  blockquote
+  quoteAuthor={`${name}, Founder`}
 
 >
-     <footer className="mt-3 text-small-regular text-ui-fg-subtle">
-    //             — {name}
-    //           </footer>
       </SplitSection>
     </section>
   )
