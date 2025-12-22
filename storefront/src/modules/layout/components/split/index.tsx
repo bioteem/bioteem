@@ -69,7 +69,7 @@ export default function SplitSection({
       className={[
         "space-y-4",
         variant === "portrait"
-          ? "max-w-[420px] h-full flex flex-col justify-start lg:pt-10"
+          ? "max-w-[600px] h-full flex flex-col justify-start lg:pt-10 ml-4"
           : "",
       ].join(" ")}
     >
@@ -121,33 +121,38 @@ export default function SplitSection({
       </div>
     )
 
-  const layoutWrapper =
-    variant === "stacked" ? (
-      <div className={["flex flex-col", spacing].join(" ")}>
-        {imageBlock}
-        {textBlock}
-      </div>
-    ) : (
-      <div
-        className={[
-          "grid w-full grid-cols-1 lg:grid-cols-2",
-          spacing,
-          variant === "portrait" ? "lg:items-start" : "lg:items-center",
-        ].join(" ")}
-      >
-        {imageOnLeft ? (
-          <>
-            {imageBlock}
-            {textBlock}
-          </>
-        ) : (
-          <>
-            {textBlock}
-            {imageBlock}
-          </>
-        )}
-      </div>
-    )
+const layoutWrapper =
+  variant === "stacked" ? (
+    <div className={["flex flex-col", spacing].join(" ")}>
+      {imageBlock}
+      {textBlock}
+    </div>
+  ) : (
+    <div
+      className={[
+        "grid w-full grid-cols-1",
+        spacing,
+
+        // ✅ portrait: use content-sized columns and center the whole block
+        variant === "portrait"
+          ? "lg:grid-cols-[minmax(0,520px)_420px] lg:justify-center lg:items-start"
+          : "lg:grid-cols-2 lg:items-center",
+      ].join(" ")}
+    >
+      {imageOnLeft ? (
+        <>
+          {imageBlock}
+          {textBlock}
+        </>
+      ) : (
+        <>
+          {textBlock}
+          {imageBlock}
+        </>
+      )}
+    </div>
+  )
+
 
   return (
     <section className="w-full py-12 md:py-16">
