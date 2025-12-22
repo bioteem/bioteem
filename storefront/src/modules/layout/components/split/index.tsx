@@ -28,7 +28,7 @@ type SplitSectionProps = {
   /** Optional overrides */
   imageAspect?: "4/3" | "4/5" | "1/1" | "16/9"
   imageMaxWidth?: number // only used in portrait variant (px)
-  tight?: boolean // makes spacing closer
+  tight?: boolean // makes spacing closer on default variant
 }
 
 const aspectClass: Record<NonNullable<SplitSectionProps["imageAspect"]>, string> =
@@ -51,10 +51,15 @@ export default function SplitSection({
   quoteAuthor,
   variant = "default",
   imageAspect,
-  imageMaxWidth = 480,
+  imageMaxWidth = 440,
   tight = false,
 }: SplitSectionProps) {
-  const spacing = tight ? "gap-6 lg:gap-8" : "gap-10 lg:gap-12"
+  const spacing =
+    variant === "portrait"
+      ? "gap-6 lg:gap-6"
+      : tight
+        ? "gap-6 lg:gap-8"
+        : "gap-10 lg:gap-12"
 
   const bodyBlock = blockquote ? (
     <blockquote className="mt-4 border-l-4 border-[#005198] pl-4">
@@ -77,8 +82,10 @@ export default function SplitSection({
     <div
       className={[
         "space-y-4",
-        // In portrait variant, make text match the image height nicely
-        variant === "portrait" ? "h-full flex flex-col justify-center" : "",
+        // portrait: more vertical presence + not overly centered
+        variant === "portrait"
+          ? "h-full flex flex-col justify-start lg:pt-16"
+          : "",
       ].join(" ")}
     >
       {eyebrow && (
@@ -100,9 +107,7 @@ export default function SplitSection({
     </div>
   )
 
-  // --- IMAGE BLOCKS PER VARIANT ---
-
-  // Default: responsive aspect ratio, can get big on desktop but "normal"
+  // Default: responsive aspect ratio
   const defaultImageBlock = (
     <div
       className={[
@@ -120,7 +125,7 @@ export default function SplitSection({
     </div>
   )
 
-  // Portrait: vertical image (4/5 by default) + capped width on desktop
+  // Portrait: vertical image + capped width so it stays portrait on desktop
   const portraitImageBlock = (
     <div className="w-full lg:flex lg:justify-end">
       <div
@@ -141,7 +146,7 @@ export default function SplitSection({
     </div>
   )
 
-  // Stacked: image on top, text below, even on desktop
+  // Stacked: image on top, text below (even on desktop)
   const stackedImageBlock = (
     <div
       className={[
@@ -149,13 +154,7 @@ export default function SplitSection({
         aspectClass[imageAspect ?? "16/9"],
       ].join(" ")}
     >
-      <Image
-        src={imageSrc}
-        alt={imageAlt}
-        fill
-        className="object-cover"
-        sizes="100vw"
-      />
+      <Image src={imageSrc} alt={imageAlt} fill className="object-cover" sizes="100vw" />
     </div>
   )
 
@@ -165,8 +164,6 @@ export default function SplitSection({
       : variant === "stacked"
         ? stackedImageBlock
         : defaultImageBlock
-
-  // --- LAYOUT WRAPPER PER VARIANT ---
 
   const layoutWrapper =
     variant === "stacked" ? (
@@ -179,7 +176,7 @@ export default function SplitSection({
         className={[
           "grid w-full grid-cols-1 lg:grid-cols-2",
           spacing,
-          // portrait: stretch so text can match image height
+          // portrait: stretch so text can match the image column height
           variant === "portrait" ? "lg:items-stretch" : "lg:items-center",
         ].join(" ")}
       >
@@ -199,9 +196,7 @@ export default function SplitSection({
 
   return (
     <section className="w-full py-12 md:py-16">
-      <div className="mx-auto flex max-w-8xl px-4 md:px-6">
-        {layoutWrapper}
-      </div>
+      <div className="mx-auto flex max-w-8xl px-4 md:px-6">{layoutWrapper}</div>
     </section>
   )
 }
