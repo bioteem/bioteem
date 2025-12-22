@@ -43,7 +43,7 @@
     "awilix": "^8.0.1",
     "medusajs-launch-utils": "0.0.18",
     "minio": "^8.0.3",
-    "next": "^15.1.11",
+    "next": "^15.5.9",
     "pg": "^8.13.1",
     "resend": "4.0.1",
     "stripe": "^20.0.0",
