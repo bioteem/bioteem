@@ -7,14 +7,13 @@ type CTAButtonProps = {
   children: React.ReactNode
   className?: string
   size?: "base" | "small" | "large" | "xlarge"
+  variant?: "primary" | "secondary"
 }
 
-type Variant = "primary" | "secondary"
-
-const variantClasses: Record<Variant, string> = {
+const variantClasses = {
   primary: "bg-[#005198] hover:bg-[#034c8c] text-white",
   secondary: "border border-black text-black hover:bg-black hover:text-white",
-}
+} as const
 
 const CTAButton = ({
   href,
@@ -22,16 +21,15 @@ const CTAButton = ({
   variant = "primary",
   size = "large",
   className = "",
-}: CTAButtonProps & { variant?: Variant }) => {
+}: CTAButtonProps) => {
   return (
-    <Link href={href}>
     <Button
       size={size}
       asChild
       className={`${variantClasses[variant]} ${className}`}
     >
-     {children}
-    </Button></Link>
+      <Link href={href}>{children}</Link>
+    </Button>
   )
 }
 
