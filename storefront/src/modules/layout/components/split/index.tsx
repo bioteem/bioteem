@@ -12,17 +12,13 @@ type SplitSectionProps = {
   imageSrc: string
   imageAlt: string
 
-  /** Flip order on desktop for split layouts (default/portrait) */
   imageOnLeft?: boolean
-
   eyebrow?: string
   children?: ReactNode
 
-  /** Render body as a quote style block */
   blockquote?: boolean
   quoteAuthor?: string
 
-  /** Layout style */
   variant?: Variant
 }
 
@@ -45,7 +41,7 @@ export default function SplitSection({
     <blockquote className="mt-3 border-l-4 border-[#005198] pl-4">
       <p
         className={[
-          "leading-relaxed italic text-ui-fg-base",
+          "italic leading-relaxed text-ui-fg-base",
           variant === "portrait" ? "text-base md:text-lg" : "text-sm md:text-base",
         ].join(" ")}
       >
@@ -73,7 +69,7 @@ export default function SplitSection({
       className={[
         "space-y-4",
         variant === "portrait"
-          ? "h-full flex flex-col justify-start lg:pt-12"
+          ? "max-w-[420px] h-full flex flex-col justify-start lg:pt-10"
           : "",
       ].join(" ")}
     >
@@ -94,32 +90,26 @@ export default function SplitSection({
       </Heading>
 
       {bodyBlock}
-
       {children && <div className="pt-2">{children}</div>}
     </div>
   )
 
   const imageBlock =
     variant === "stacked" ? (
-      // stacked: wide hero image
       <div className="relative w-full overflow-hidden rounded-3xl bg-ui-bg-subtle aspect-video">
         <Image src={imageSrc} alt={imageAlt} fill className="object-cover" sizes="100vw" />
       </div>
     ) : variant === "portrait" ? (
-      // portrait: vertical portrait + capped width so it doesn't blow up on desktop
-      <div className="w-full lg:flex lg:justify-end">
-        <div className="relative w-full overflow-hidden rounded-3xl bg-ui-bg-subtle aspect-[4/5] lg:max-w-[420px]">
-          <Image
-            src={imageSrc}
-            alt={imageAlt}
-            fill
-            className="object-cover object-[50%_20%]"
-            sizes="(min-width: 1024px) 420px, 100vw"
-          />
-        </div>
+      <div className="relative w-full max-w-[420px] overflow-hidden rounded-3xl bg-ui-bg-subtle aspect-[4/5]">
+        <Image
+          src={imageSrc}
+          alt={imageAlt}
+          fill
+          className="object-cover object-[50%_20%]"
+          sizes="(min-width: 1024px) 420px, 100vw"
+        />
       </div>
     ) : (
-      // default: standard landscape
       <div className="relative w-full overflow-hidden rounded-3xl bg-ui-bg-subtle aspect-[4/3]">
         <Image
           src={imageSrc}
@@ -142,7 +132,7 @@ export default function SplitSection({
         className={[
           "grid w-full grid-cols-1 lg:grid-cols-2",
           spacing,
-          variant === "portrait" ? "lg:items-stretch" : "lg:items-center",
+          variant === "portrait" ? "lg:items-start" : "lg:items-center",
         ].join(" ")}
       >
         {imageOnLeft ? (
@@ -161,7 +151,7 @@ export default function SplitSection({
 
   return (
     <section className="w-full py-12 md:py-16">
-      <div className="mx-auto flex max-w-8xl px-4 md:px-6">{layoutWrapper}</div>
+      <div className="mx-auto max-w-8xl px-4 md:px-6">{layoutWrapper}</div>
     </section>
   )
 }
