@@ -574,6 +574,8 @@ const { addShippingMethodToCartWorkflow } = coreFlows
           },
 
           metadata: {
+            source: "subscription",                 // ✅ add this
+            is_subscription_order: true,  
             subscription_id: sub.id,
             stripe_subscription_id: stripeSubId,
             stripe_invoice_id: invoiceAny.id,
@@ -668,6 +670,31 @@ await addShippingMethodToCartWorkflow(req.scope).run({
         })
 
         createdOrder = completed
+      if (createdOrder?.id) {
+  try {
+    const existingOrderMetadata =
+      (createdOrder.metadata || {}) as Record<string, any>
+
+    await orderModule.updateOrders(
+      { id: createdOrder.id },
+      {
+        metadata: {
+          ...existingOrderMetadata,
+          source: "subscription",
+          is_subscription_order: true,
+          subscription_id: sub.id,
+          stripe_subscription_id: stripeSubId,
+          stripe_invoice_id: invoiceAny.id,
+          stripe_customer_id: sub.stripe_customer_id,
+        },
+      }
+    )
+
+    console.log("[subscriptions] Tagged order as subscription", createdOrder.id)
+  } catch (e) {
+    console.warn("[subscriptions] Failed to tag order metadata", createdOrder.id, e)
+  }
+}
 
         console.log(
           "[subscriptions] Created order via cart workflow",

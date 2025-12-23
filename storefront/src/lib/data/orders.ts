@@ -12,7 +12,11 @@ export const retrieveOrder = cache(async function (id: string) {
       { fields: "*payment_collections.payments" },
       { next: { tags: ["order"] }, ...getAuthHeaders() }
     )
-    .then(({ order }) => order)
+    .then(({ order }) => {if (order?.metadata?.source === "subscription") {
+        return null // or throw, or redirect in the page
+      }
+      return order
+    })
     .catch((err) => medusaError(err))
 })
 
@@ -22,6 +26,9 @@ export const listOrders = cache(async function (
 ) {
   return sdk.store.order
     .list({ limit, offset }, { next: { tags: ["order"] }, ...getAuthHeaders() })
-    .then(({ orders }) => orders)
+    .then(({ orders }) => (orders ?? []).filter(
+        (order) => order?.metadata?.source !== "subscription"
+      )
+    )
     .catch((err) => medusaError(err))
 })
