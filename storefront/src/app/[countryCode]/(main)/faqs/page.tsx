@@ -15,7 +15,7 @@ export default function FaqPage() {
       </p>
 
       <div className="mt-10 max-w-3xl">
-        <Faq items={FAQS} defaultValue="item-0" />
+        <Faq items={FAQS} />
       </div>
     </div>
   )

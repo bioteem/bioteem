@@ -8,22 +8,12 @@ type FaqItem = {
   a: string
 }
 
-export default function Faq({
-  items,
-  defaultValue,
-}: {
-  items: FaqItem[]
-  defaultValue?: string
-}) {
+export default function Faq({ items }: { items: FaqItem[] }) {
   return (
-    <AccordionPrimitive.Root
-      type="single"
-      collapsible
-      defaultValue={defaultValue}
-      className="w-full"
-    >
+    <AccordionPrimitive.Root type="single" collapsible className="w-full">
       {items.map((item, idx) => {
         const value = `item-${idx}`
+
         return (
           <AccordionPrimitive.Item
             key={value}
@@ -31,9 +21,20 @@ export default function Faq({
             className="border-ui-border-base border-b py-4"
           >
             <AccordionPrimitive.Header>
-              <AccordionPrimitive.Trigger className="w-full text-left flex items-center justify-between gap-4">
+              {/* Trigger gets data-state="open|closed" */}
+              <AccordionPrimitive.Trigger className="group w-full text-left flex items-center justify-between gap-4">
                 <Text className="text-ui-fg-base">{item.q}</Text>
-                <span className="text-ui-fg-subtle text-lg leading-none">+</span>
+
+                <span className="relative w-5 h-5 flex items-center justify-center">
+                  {/* Plus when CLOSED */}
+                  <span className="block group-data-[state=open]:hidden text-ui-fg-subtle text-lg leading-none">
+                    +
+                  </span>
+                  {/* Minus when OPEN */}
+                  <span className="hidden group-data-[state=open]:block text-ui-fg-subtle text-lg leading-none">
+                    −
+                  </span>
+                </span>
               </AccordionPrimitive.Trigger>
             </AccordionPrimitive.Header>
 
