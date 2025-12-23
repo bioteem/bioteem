@@ -1,32 +1,55 @@
 import CTAButton from "@modules/common/components/call-to-action-btn"
 
-export default function ContactPage() {
+type ContactSectionProps = {
+  title?: string
+  description?: string
+  email?: string
+  phone?: string
+  address?: string
+  hours?: string
+}
+
+export function ContactSection({
+  title = "Contact Us",
+  description = "Have a question about our products, subscriptions, or anything else? Reach out and we’ll get back to you as soon as possible.",
+  email = "info@bioteem40.ca",
+  phone = "+1 (902) 306-4110",
+  address = "93 Centennial Dr, Windsor, Nova Scotia, Canada B0N 2T0",
+}: ContactSectionProps) {
   return (
     <div className="content-container py-20">
-      <div className="max-w-2xl mx-auto text-center space-y-8">
-        <h1 className="text-3xl font-semibold">Contact Us</h1>
+      <div className="mx-auto max-w-2xl text-center space-y-8">
+        <h1 className="text-3xl font-semibold">{title}</h1>
 
-        <p className="text-base text-gray-700">
-          Have a question about our products, subscriptions, or anything else?
-          Reach out and we’ll get back to you as soon as possible.
-        </p>
+        <p className="text-base text-gray-700">{description}</p>
 
-        <div className="space-y-2 text-sm text-gray-600">
+        <div className="space-y-3 text-sm text-gray-600">
           <p>
             <span className="font-medium">Email:</span>{" "}
             <a
-              href="mailto:support@yourdomain.com"
+              href={`mailto:${email}`}
               className="underline hover:text-black"
             >
-              support@yourdomain.com
+              {email}
             </a>
           </p>
+
           <p>
-            <span className="font-medium">Hours:</span> Monday – Friday, 9am–5pm
+            <span className="font-medium">Phone:</span>{" "}
+            <a
+              href={`tel:${phone}`}
+              className="underline hover:text-black"
+            >
+              {phone}
+            </a>
+          </p>
+
+          <p>
+            <span className="font-medium">Address:</span> {address}
           </p>
         </div>
 
-        <CTAButton href="mailto:support@yourdomain.com?subject=Support%20Request">
+        <CTAButton href={`mailto:${email}?subject=Support%20Request`}>
           Email Us
         </CTAButton>
       </div>

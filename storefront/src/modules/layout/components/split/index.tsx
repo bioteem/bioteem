@@ -139,17 +139,29 @@ const layoutWrapper =
           : "lg:grid-cols-2 lg:items-center",
       ].join(" ")}
     >
-      {imageOnLeft ? (
-        <>
-          {imageBlock}
-          {textBlock}
-        </>
-      ) : (
-        <>
-          {textBlock}
-          {imageBlock}
-        </>
-      )}
+      <>
+  <div
+    className={[
+      // mobile: image first
+      "order-1",
+      // desktop: respect imageOnLeft
+      imageOnLeft ? "lg:order-1" : "lg:order-2",
+    ].join(" ")}
+  >
+    {imageBlock}
+  </div>
+
+  <div
+    className={[
+      // mobile: text second
+      "order-2",
+      imageOnLeft ? "lg:order-2" : "lg:order-1",
+    ].join(" ")}
+  >
+    {textBlock}
+  </div>
+</>
+
     </div>
   )
 
