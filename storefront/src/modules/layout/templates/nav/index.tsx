@@ -1,42 +1,47 @@
 import { Suspense } from "react"
+import Image from "next/image"
 
 import { listRegions } from "@lib/data/regions"
 import { StoreRegion } from "@medusajs/types"
 import LocalizedClientLink from "@modules/common/components/localized-client-link"
 import CartButton from "@modules/layout/components/cart-button"
 import SideMenu from "@modules/layout/components/side-menu"
-import Image from "next/image"
+import TopNavLinks from "@modules/layout/components/top_nav"
 
 export default async function Nav() {
   const regions = await listRegions().then((regions: StoreRegion[]) => regions)
 
   return (
-    <div className="sticky top-0 inset-x-0 z-50 group">
+    <div className="sticky top-0 inset-x-0 z-50 group bg-white">
+      {/* MAIN HEADER ROW */}
       <header className="relative h-16 mx-auto border-b duration-200 bg-white border-ui-border-base">
         <nav className="content-container txt-xsmall-plus text-ui-fg-subtle flex items-center justify-between w-full h-full text-small-regular">
+          {/* LEFT: SideMenu on mobile only */}
           <div className="flex-1 basis-0 h-full flex items-center">
-            <div className="h-full">
+            <div className="h-full small:hidden">
               <SideMenu regions={regions} />
             </div>
           </div>
 
-         <div className="flex items-center h-full">
-  <LocalizedClientLink
-    href="/"
-    className="flex items-center h-full"
-    data-testid="nav-store-link"
-  >
-    <Image
-      src="/bioteemlogo.png"
-      alt="Bioteem"
-      width={140}       // adjust to your navbar height
-      height={40}
-      className="bioteemlogo"
-      priority
-    />
-  </LocalizedClientLink>
-</div>
+          {/* CENTER: Logo */}
+          <div className="flex items-center h-full">
+            <LocalizedClientLink
+              href="/"
+              className="flex items-center h-full"
+              data-testid="nav-store-link"
+            >
+              <Image
+                src="/bioteemlogo.png"
+                alt="Bioteem"
+                width={140}
+                height={40}
+                className="bioteemlogo"
+                priority
+              />
+            </LocalizedClientLink>
+          </div>
 
+          {/* RIGHT: Desktop links (Account/Search) + Cart */}
           <div className="flex items-center gap-x-6 h-full flex-1 basis-0 justify-end">
             <div className="hidden small:flex items-center gap-x-6 h-full">
               {process.env.NEXT_PUBLIC_FEATURE_SEARCH_ENABLED && (
@@ -57,6 +62,7 @@ export default async function Nav() {
                 Account
               </LocalizedClientLink>
             </div>
+
             <Suspense
               fallback={
                 <LocalizedClientLink
@@ -73,6 +79,9 @@ export default async function Nav() {
           </div>
         </nav>
       </header>
+
+      {/* SECOND ROW: Top nav links on desktop only */}
+      <TopNavLinks />
     </div>
   )
 }
