@@ -81,7 +81,11 @@ export default async function Nav() {
       </header>
 
       {/* SECOND ROW: Top nav links on desktop only */}
-      <TopNavLinks />
+{/* SECOND ROW: Top nav links on desktop only */}
+<div className="hidden small:block">
+  <TopNavLinks />
+</div>
+
     </div>
   )
 }
