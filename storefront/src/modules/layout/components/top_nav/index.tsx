@@ -7,6 +7,7 @@ export default function TopNavLinks() {
         <LocalizedClientLink href="/store">Shop</LocalizedClientLink>
         <LocalizedClientLink href="/about">About</LocalizedClientLink>
         <LocalizedClientLink href="/">Blog</LocalizedClientLink>
+        <LocalizedClientLink href="/faqs">FAQs</LocalizedClientLink>
         <LocalizedClientLink href="/contact">Contact</LocalizedClientLink>
       </div>
     </div>

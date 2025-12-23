@@ -19,9 +19,13 @@ type AccordionItemProps = AccordionPrimitive.AccordionItemProps & {
 
 type AccordionProps =
   | (AccordionPrimitive.AccordionSingleProps &
-      React.RefAttributes<HTMLDivElement>)
+      React.RefAttributes<HTMLDivElement> & {
+        children?: React.ReactNode
+      })
   | (AccordionPrimitive.AccordionMultipleProps &
-      React.RefAttributes<HTMLDivElement>)
+      React.RefAttributes<HTMLDivElement> & {
+        children?: React.ReactNode
+      })
 
 const Accordion: React.FC<AccordionProps> & {
   Item: React.FC<AccordionItemProps>
