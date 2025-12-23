@@ -24,7 +24,7 @@ export default function AboutPage() {
 Bioteem is designed to prepare your gut first, balancing your microbiome with a potent blend of probiotics and prebiotic fibre. This allows your body to fully absorb the layered “onion” of nutrients that, thanks to our proprietary technology, arrives in your gut intact and ready to be put to work where it matters most."
         imageSrc="/assets/our-science.jpg"
         imageAlt="Bioteem Products with the powder form beneath it."
-        variant="default"
+        variant="stacked"
         
         >
         </SplitSection>
