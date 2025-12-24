@@ -10,6 +10,7 @@ import ProductIngredients from "@modules/products/components/product-ingredients
 import SkeletonRelatedProducts from "@modules/skeletons/templates/skeleton-related-products"
 import { notFound } from "next/navigation"
 import ProductActionsWrapper from "./product-actions-wrapper"
+import TripleInfoSection from "../components/product-detail"
 import { HttpTypes } from "@medusajs/types"
 import type { SubscriptionPlan } from "@lib/data/products" 
 type ProductTemplateProps = {
@@ -60,6 +61,9 @@ const ProductTemplate: React.FC<ProductTemplateProps> = ({
           </Suspense>
         </div>
       </div>
+      <TripleInfoSection
+      product ={product}
+    />
       <div
         className="content-container my-16 small:my-32"
         data-testid="related-products-container"
