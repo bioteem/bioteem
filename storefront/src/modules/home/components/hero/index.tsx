@@ -15,6 +15,8 @@ const Hero = () => {
       {/* Background video (fills the section) */}
       <div className="absolute inset-0">
         <MuxBackgroundVideo
+        autoPlay={true}
+        preload="auto"
           src={streamSrc}
         >
           <img
@@ -26,8 +28,8 @@ const Hero = () => {
       </div>
 
 
-      {/* <div className="absolute inset-0 z-10">
-        <div className="absolute inset-0 backdrop-blur-md bg-black/25" />
+      <div className="absolute inset-0">
+        <div className="absolute inset-0 backdrop-blur-sm bg-black/10" />
       </div>
 
 
@@ -46,7 +48,7 @@ const Hero = () => {
             </CTAButton>
           </div>
         </div>
-      </div> */}
+      </div>
     </section>
   )
 }
