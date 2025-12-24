@@ -1,6 +1,7 @@
 import { HttpTypes } from "@medusajs/types"
 import { Heading, Text } from "@medusajs/ui"
 import LocalizedClientLink from "@modules/common/components/localized-client-link"
+import ReactMarkdown from "react-markdown"
 
 type ProductInfoProps = {
   product: HttpTypes.StoreProduct
@@ -30,8 +31,12 @@ const ProductInfo = ({ product }: ProductInfoProps) => {
           className="text-medium text-ui-fg-subtle whitespace-pre-line"
           data-testid="product-description"
         >
-          {product.description}
-        </Text>
+        <div className="prose prose-sm max-w-none">
+  <ReactMarkdown>
+    {product.description ?? ""}
+  </ReactMarkdown>
+</div>
+ </Text>
       </div>
     </div>
   )
