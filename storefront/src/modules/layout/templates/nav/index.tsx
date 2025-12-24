@@ -27,7 +27,7 @@ export default async function Nav() {
           <div className="flex items-center h-full">
             <LocalizedClientLink
               href="/"
-              className="flex items-center h-full"
+              className="flex items-center h-full cursor-pointer"
               data-testid="nav-store-link"
             >
               <Image
