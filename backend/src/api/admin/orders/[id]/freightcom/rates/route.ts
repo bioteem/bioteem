@@ -37,26 +37,50 @@ async function freightcomRequest(
   path: string,
   opts?: { method?: string; body?: any }
 ) {
-  const base = requireEnv("FREIGHTCOM_API_BASE_URL") // e.g. https://external-api.freightcom.com
+  const base = requireEnv("FREIGHTCOM_API_BASE_URL")
   const key = requireEnv("FREIGHTCOM_API_KEY")
 
-  const res = await fetch(`${base}${path}`, {
-    method: opts?.method || "GET",
+  const url = `${base}${path}`
+  const method = opts?.method || "GET"
+
+  const res = await fetch(url, {
+    method,
     headers: {
       "Content-Type": "application/json",
-      // per your Freightcom setup
       Authorization: key,
     },
     body: opts?.body ? JSON.stringify(opts.body) : undefined,
   })
 
   const text = await res.text().catch(() => "")
-  if (!res.ok) {
-    throw new Error(`Freightcom ${res.status}: ${text || res.statusText}`)
+
+  // Try parse, but don't ever throw from parse
+  let json: any = null
+  try {
+    json = text ? JSON.parse(text) : null
+  } catch {
+    json = null
   }
 
-  return text ? JSON.parse(text) : {}
+  if (!res.ok) {
+    // Log the real error in backend logs
+    console.error("Freightcom error", {
+      url,
+      method,
+      status: res.status,
+      statusText: res.statusText,
+      body: json ?? text,
+    })
+
+    // Throw a readable error back to Medusa
+    throw new Error(
+      `Freightcom ${res.status}: ${JSON.stringify(json ?? { raw: text })}`
+    )
+  }
+
+  return json ?? { raw: text }
 }
+
 
 function round2(n: number) {
   return Math.round(n * 100) / 100
@@ -131,6 +155,7 @@ function buildFreightcomPackages(order: any) {
 
 
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
+  try{
   const orderId = req.params.id
   const orderService = req.scope.resolve<IOrderModuleService>(Modules.ORDER)
 
@@ -239,6 +264,11 @@ if (!order) {
       return res.json({ rate_id, rates: result.rates })
     }
   }
-
+  
   return res.status(202).json({ rate_id })
+ } catch (e: any) {
+    return res.status(500).json({
+      message: e?.message || "Unknown error",
+    })
+  }
 }
