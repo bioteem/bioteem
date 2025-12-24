@@ -11,71 +11,58 @@ const Hero = () => {
   const [ended, setEnded] = useState(false)
 
   return (
-    <section className="relative h-[75vh] w-full overflow-hidden border-b border-ui-border-base bg-ui-bg-subtle">
+    <section className="relative h-[75vh] w-full overflow-hidden bg-black">
       {/* Video background */}
-      <div className="absolute inset-0">
-        <MuxPlayer
-          playbackId={PLAYBACK_ID}
-          streamType="on-demand"
-          // Autoplay requirements
-          autoPlay
-          muted
-          playsInline
-          loop={false}
-          // If your video has audio, keep controls hidden in hero
-          controls={false}
-          // Important for a hero background
-          className="h-full w-full object-cover"
-          style={{
-            // Some versions of mux-player need explicit fit
-            objectFit: "cover",
-          }}
-          // When it finishes, we show the blur + CTA overlay
-          onEnded={() => setEnded(true)}
-        />
+      <MuxPlayer
+        playbackId={PLAYBACK_ID}
+        streamType="on-demand"
+        autoPlay
+        muted
+        playsInline
+        loop={false}
+        preload="auto"
+        onEnded={() => setEnded(true)}
+        className="absolute inset-0 h-full w-full"
+        style={{
+          objectFit: "cover", // 🔑 removes black bars
+        }}
+      />
 
-        {/* Optional: subtle dark overlay while video plays for readability */}
-        <div className="absolute inset-0 bg-black/20" />
-      </div>
+      {/* Dark overlay for contrast */}
+      <div className="absolute inset-0 bg-black/20" />
 
-      {/* When ended: blur + freeze-like feel + show content */}
+      {/* Blur overlay after video ends */}
       <div
-        className={[
-          "absolute inset-0 transition-opacity duration-500",
-          ended ? "opacity-100" : "opacity-0 pointer-events-none",
-        ].join(" ")}
+        className={`absolute inset-0 transition-opacity duration-500 ${
+          ended ? "opacity-100" : "opacity-0 pointer-events-none"
+        }`}
       >
-        {/* blurred “frozen” overlay */}
         <div className="absolute inset-0 backdrop-blur-md bg-black/25" />
       </div>
 
-      {/* Content (only show after video ends) */}
-      <div className="relative z-10 flex h-full w-full items-center justify-center px-4">
+      {/* Content */}
+      <div className="relative z-10 flex h-full items-center justify-center px-6">
         <div
-          className={[
-            "max-w-2xl text-center transition-all duration-500",
-            ended ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2 pointer-events-none",
-          ].join(" ")}
+          className={`text-center transition-all duration-500 ${
+            ended
+              ? "opacity-100 translate-y-0"
+              : "opacity-0 translate-y-2 pointer-events-none"
+          }`}
         >
-          <div className="inline-flex flex-col gap-4 rounded-3xl">
-            <Heading
-              level="h1"
-              className="text-3xl md:text-4xl leading-tight text-white font-normal"
-            >
-              Designed to Nourish
-            </Heading>
+          <Heading
+            level="h1"
+            className="text-3xl md:text-4xl font-normal text-white"
+          >
+            Designed to Nourish
+          </Heading>
 
-            <div className="mt-4 flex justify-center">
-              <CTAButton href="/store" variant="primary">
-                Shop Now
-              </CTAButton>
-            </div>
+          <div className="mt-6 flex justify-center">
+            <CTAButton href="/store" variant="primary">
+              Shop Now
+            </CTAButton>
           </div>
         </div>
       </div>
-
-      {/* Optional: if you want the CTA visible immediately on slow connections,
-          you can start ended=true after a timeout fallback. */}
     </section>
   )
 }
