@@ -1,6 +1,4 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
-import type { IOrderModuleService } from "@medusajs/framework/types"
-import { Modules } from "@medusajs/framework/utils"
 import type { Query } from "@medusajs/framework/types"
 
 export const AUTHENTICATE = true
@@ -158,7 +156,6 @@ function buildFreightcomPackages(order: any) {
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   try{
   const orderId = req.params.id
-  const orderService = req.scope.resolve<IOrderModuleService>(Modules.ORDER)
 
   // ✅ Medusa v2: use fields (explicit), NOT select/relations
 const query = req.scope.resolve<Query>("query")
@@ -257,27 +254,17 @@ if (!order) {
 
 
   const created = await freightcomRequest("/rate", { method: "POST", body: payload })
-  const rate_id = created?.rate_id
+const request_id = created?.request_id
 
-  if (!rate_id) {
+  if (!request_id) {
     return res.status(502).json({
-      message: "Freightcom did not return rate_id.",
+      message: "Freightcom did not return request_id.",
       raw: created,
     })
   }
 
-  const pollMs = Number(process.env.FREIGHTCOM_RATE_POLL_MS || 800)
-  const pollMax = Number(process.env.FREIGHTCOM_RATE_POLL_MAX || 12)
-
-  for (let i = 0; i < pollMax; i++) {
-    await sleep(pollMs)
-    const result = await freightcomRequest(`/rate/${rate_id}`)
-    if (Array.isArray(result?.rates)) {
-      return res.json({ rate_id, rates: result.rates })
-    }
-  }
-  
-  return res.status(202).json({ rate_id })
+  // return immediately; frontend will poll GET
+  return res.status(202).json({ request_id })
  } catch (e: any) {
     return res.status(500).json({
       message: e?.message || "Unknown error",
