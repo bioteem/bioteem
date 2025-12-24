@@ -1,70 +1,51 @@
 "use client"
 
-import { useState } from "react"
-import { Heading } from "@medusajs/ui"
+import { useEffect, useState } from "react"
 import CTAButton from "@modules/common/components/call-to-action-btn"
-import MuxPlayer from "@mux/mux-player-react"
-
 import { MuxBackgroundVideo } from '@mux/mux-background-video/react';
+import { Heading } from "@medusajs/ui"
 
-const PLAYBACK_ID = "cj6X00oNm01fVYgBK24HyXjvdbH8G01200Gf5vSD5Go7Fw4"
+export default function Hero() {
+  const [showOverlay, setShowOverlay] = useState(false)
 
-const Hero = () => {
-  const [ended, setEnded] = useState(false)
+  useEffect(() => {
+    const t = window.setTimeout(() => setShowOverlay(true), 1100) // match your intro duration
+    return () => window.clearTimeout(t)
+  }, [])
 
   return (
-    <section className="relative w-full overflow-hidden bg-black h-[60vh] sm:h-[65vh] lg:h-[75vh]">
-      {/* Background video layer */}
-      {/* <div className="absolute inset-0 overflow-hidden">
-        <MuxPlayer
-          playbackId={PLAYBACK_ID}
-          streamType="on-demand"
-          autoPlay
-          muted
-          playsInline
-          loop={false}
-          preload="auto"
-          
-          // Make it a background layer and crop edges by scaling
-          className="absolute inset-0 z-0 h-full w-full pointer-events-none
-                     scale-[1.12] sm:scale-[1.16] lg:scale-[1.22]"
-          style={{
-            width: "100%",
-            height: "100%",
-            objectFit: "cover",
-          }}
+    <section className="relative h-[75vh] w-full overflow-hidden bg-black">
+      <MuxBackgroundVideo
+        src="https://stream.mux.com/cj6X00oNm01fVYgBK24HyXjvdbH8G01200Gf5vSD5Go7Fw4.m3u8"
+      >
+        <img
+          src="https://image.mux.com/cj6X00oNm01fVYgBK24HyXjvdbH8G01200Gf5vSD5Go7Fw4/thumbnail.webp?time=0"
+          alt="Bioteem hero"
+          className="h-full w-full object-cover"
         />
-      </div> */}
+      </MuxBackgroundVideo>
 
-       <MuxBackgroundVideo onEnded={() => setEnded(true)} src="https://stream.mux.com/cj6X00oNm01fVYgBK24HyXjvdbH8G01200Gf5vSD5Go7Fw4.m3u8">
-      <img src="https://image.mux.com/cj6X00oNm01fVYgBK24HyXjvdbH8G01200Gf5vSD5Go7Fw4/thumbnail.webp?time=0" alt="Mux Background Video" />
-    </MuxBackgroundVideo>
+      {/* Always keep a subtle overlay for readability */}
+      <div className="absolute inset-0 bg-black/15" />
 
-      {/* Contrast overlay */}
-      <div className="absolute z-10 inset-0 bg-black/20" />
-
-      {/* Blur overlay after video ends */}
+      {/* Blur + CTA appears after timer */}
       <div
         className={`absolute inset-0 transition-opacity duration-500 ${
-          ended ? "opacity-100" : "opacity-0 pointer-events-none"
+          showOverlay ? "opacity-100" : "opacity-0 pointer-events-none"
         }`}
       >
         <div className="absolute inset-0 backdrop-blur-md bg-black/25" />
       </div>
 
-      {/* Content */}
-      <div className="relative z-20 flex h-full items-center justify-center px-6">
+      <div className="relative z-10 flex h-full items-center justify-center px-6">
         <div
           className={`text-center transition-all duration-500 ${
-            ended
+            showOverlay
               ? "opacity-100 translate-y-0"
               : "opacity-0 translate-y-2 pointer-events-none"
           }`}
         >
-          <Heading
-            level="h1"
-            className="text-3xl md:text-4xl font-normal text-white"
-          >
+          <Heading level="h1" className="text-3xl md:text-4xl font-normal text-white">
             Designed to Nourish
           </Heading>
 
@@ -78,5 +59,3 @@ const Hero = () => {
     </section>
   )
 }
-
-export default Hero
