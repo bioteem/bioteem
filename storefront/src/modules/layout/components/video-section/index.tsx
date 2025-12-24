@@ -1,29 +1,40 @@
 "use client"
 
 import { Heading, Text } from "@medusajs/ui"
+import MuxPlayer from "@mux/mux-player-react"
 
-type FullWidthVideoSectionProps = {
+type FullWidthMuxVideoSectionProps = {
   title?: string
   description?: string
-  videoSrc: string
-  posterSrc: string
-  captionsSrc?: string
+
+  /** Mux Playback ID (e.g. "cj6X00oN...") */
+  playbackId: string
+
+  /** Optional poster time (seconds) used for poster + fallback thumbnail */
+  posterTime?: number
+
+  /** Optional: show native-like player controls */
+  showControls?: boolean
+
+  /** Optional transcript */
   transcript?: string
 }
 
 const FullWidthVideoSection = ({
   title,
   description,
-  videoSrc,
-  posterSrc,
-  captionsSrc,
+  playbackId,
+  posterTime = 0,
+  showControls = true,
   transcript,
-}: FullWidthVideoSectionProps) => {
+}: FullWidthMuxVideoSectionProps) => {
+  const posterUrl = `https://image.mux.com/${playbackId}/thumbnail.webp?time=${posterTime}`
+
   return (
     <section className="w-full bg-ui-bg-subtle py-12 md:py-16">
       {/* Optional Text Above */}
       {(title || description) && (
-        <div className="mx-auto max-w-4xl px-4 text-center mb-8 space-y-3">
+        <div className="mx-auto mb-8 max-w-4xl space-y-3 px-4 text-center">
           {title && (
             <Heading
               level="h2"
@@ -40,27 +51,24 @@ const FullWidthVideoSection = ({
         </div>
       )}
 
-      {/* Full-width video */}
+      {/* Full-width Mux video */}
       <div className="w-full">
-        <video
-          className="w-full h-auto object-cover"
-          src={videoSrc}
-          poster={posterSrc}
-          controls
-          playsInline
+        <MuxPlayer
+          playbackId={playbackId}
+          streamType="on-demand"
           preload="metadata"
-          aria-describedby="video-transcript"
-        >
-          {captionsSrc && (
-            <track
-              kind="captions"
-              src={captionsSrc}
-              srcLang="en"
-              label="English captions"
-              default
-            />
-          )}
-        </video>
+          playsInline
+          
+          // If you want autoplay, pass autoPlay+muted from parent or extend props
+          poster={posterUrl}
+          className="w-full"
+          style={{
+            width: "100%",
+            height: "auto",
+            aspectRatio: "16 / 9", // change if your video isn't 16:9
+          }}
+          aria-describedby={transcript ? "video-transcript" : undefined}
+        />
       </div>
 
       {/* Optional transcript */}

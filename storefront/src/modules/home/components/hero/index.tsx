@@ -42,7 +42,7 @@ const Hero = () => {
         </MuxBackgroundVideo>
       </div>
 
-      <div className="absolute inset-0 backdrop-blur-md bg-black/25" />
+      <div className="absolute inset-0 backdrop-blur-[6px] bg-black/25" />
 
       <div className="relative z-20 flex h-full items-center justify-center px-6">
         <div className="text-center">

@@ -56,14 +56,11 @@ export default async function Home({
       </div>
 
 
-      {/* <FullWidthVideoSection
+       <FullWidthVideoSection
   title="How Bioteem 40 Works"
   description="A quick walkthrough of what makes our formula effective and how it supports gut balance every day."
-  videoSrc="/assets/full-product-video.mp4"
-  posterSrc="/assets/video-poster.jpg"
-  captionsSrc="/assets/full-product-video.mp4"
-  transcript="This video explains how Bioteem 40 supports digestive wellness..."
-/> */} 
+  playbackId="g3rW701YuAQKU01DeO7YVznydwxtEHAVPP004oXrUnKmrU"
+/> 
 
 {/* Need to work on making thevideo work through a CDN or a youtube service */}
 
