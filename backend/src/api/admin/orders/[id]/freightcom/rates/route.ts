@@ -32,7 +32,6 @@ function getExpectedShipDate() {
   }
 }
 
-
 async function freightcomRequest(
   path: string,
   opts?: { method?: string; body?: any }
@@ -42,6 +41,18 @@ async function freightcomRequest(
 
   const url = `${base}${path}`
   const method = opts?.method || "GET"
+  const body = opts?.body ? JSON.stringify(opts.body, null, 2) : undefined
+
+  // 🔍 LOG OUTGOING REQUEST (THIS IS WHAT WE NEED)
+  console.log("📦 Freightcom REQUEST", {
+    url,
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: "[REDACTED]",
+    },
+    body: opts?.body,
+  })
 
   const res = await fetch(url, {
     method,
@@ -49,12 +60,11 @@ async function freightcomRequest(
       "Content-Type": "application/json",
       Authorization: key,
     },
-    body: opts?.body ? JSON.stringify(opts.body) : undefined,
+    body,
   })
 
   const text = await res.text().catch(() => "")
 
-  // Try parse, but don't ever throw from parse
   let json: any = null
   try {
     json = text ? JSON.parse(text) : null
@@ -63,23 +73,22 @@ async function freightcomRequest(
   }
 
   if (!res.ok) {
-    // Log the real error in backend logs
-    console.error("Freightcom error", {
-      url,
-      method,
+    console.error("❌ Freightcom RESPONSE", {
       status: res.status,
       statusText: res.statusText,
       body: json ?? text,
     })
 
-    // Throw a readable error back to Medusa
     throw new Error(
       `Freightcom ${res.status}: ${JSON.stringify(json ?? { raw: text })}`
     )
   }
 
+  console.log("✅ Freightcom RESPONSE", json ?? text)
+
   return json ?? { raw: text }
 }
+
 
 
 function round2(n: number) {
