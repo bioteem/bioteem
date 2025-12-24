@@ -29,6 +29,7 @@
     "@medusajs/types": "preview",
     "@medusajs/ui": "preview",
     "@meilisearch/instant-meilisearch": "^0.7.1",
+    "@mux/mux-background-video": "^0.2.0",
     "@mux/mux-player": "^3.10.2",
     "@mux/mux-player-react": "^3.10.2",
     "@paypal/paypal-js": "^5.0.6",

@@ -5,6 +5,8 @@ import { Heading } from "@medusajs/ui"
 import CTAButton from "@modules/common/components/call-to-action-btn"
 import MuxPlayer from "@mux/mux-player-react"
 
+import { MuxBackgroundVideo } from '@mux/mux-background-video/react';
+
 const PLAYBACK_ID = "cj6X00oNm01fVYgBK24HyXjvdbH8G01200Gf5vSD5Go7Fw4"
 
 const Hero = () => {
@@ -13,7 +15,7 @@ const Hero = () => {
   return (
     <section className="relative w-full overflow-hidden bg-black h-[60vh] sm:h-[65vh] lg:h-[75vh]">
       {/* Background video layer */}
-      <div className="absolute inset-0 overflow-hidden">
+      {/* <div className="absolute inset-0 overflow-hidden">
         <MuxPlayer
           playbackId={PLAYBACK_ID}
           streamType="on-demand"
@@ -22,7 +24,7 @@ const Hero = () => {
           playsInline
           loop={false}
           preload="auto"
-          onEnded={() => setEnded(true)}
+          
           // Make it a background layer and crop edges by scaling
           className="absolute inset-0 z-0 h-full w-full pointer-events-none
                      scale-[1.12] sm:scale-[1.16] lg:scale-[1.22]"
@@ -32,7 +34,11 @@ const Hero = () => {
             objectFit: "cover",
           }}
         />
-      </div>
+      </div> */}
+
+       <MuxBackgroundVideo onEnded={() => setEnded(true)} src="https://stream.mux.com/cj6X00oNm01fVYgBK24HyXjvdbH8G01200Gf5vSD5Go7Fw4.m3u8">
+      <img src="https://image.mux.com/cj6X00oNm01fVYgBK24HyXjvdbH8G01200Gf5vSD5Go7Fw4/thumbnail.webp?time=0" alt="Mux Background Video" />
+    </MuxBackgroundVideo>
 
       {/* Contrast overlay */}
       <div className="absolute z-10 inset-0 bg-black/20" />
