@@ -11,25 +11,31 @@ const Hero = () => {
   const [ended, setEnded] = useState(false)
 
   return (
-    <section className="relative h-[75vh] w-full overflow-hidden bg-black">
-      {/* Video background */}
-      <MuxPlayer
-        playbackId={PLAYBACK_ID}
-        streamType="on-demand"
-        autoPlay
-        muted
-        playsInline
-        loop={false}
-        preload="auto"
-        onEnded={() => setEnded(true)}
-        className="absolute inset-0 h-full w-full mux-no-controls pointer-events-none"
-        style={{
-          objectFit: "cover", // 🔑 removes black bars
-        }}
-      />
+    <section className="relative w-full overflow-hidden bg-black h-[60vh] sm:h-[65vh] lg:h-[75vh]">
+      {/* Background video layer */}
+      <div className="absolute inset-0 overflow-hidden">
+        <MuxPlayer
+          playbackId={PLAYBACK_ID}
+          streamType="on-demand"
+          autoPlay
+          muted
+          playsInline
+          loop={false}
+          preload="auto"
+          onEnded={() => setEnded(true)}
+          // Make it a background layer and crop edges by scaling
+          className="absolute inset-0 z-0 h-full w-full pointer-events-none
+                     scale-[1.12] sm:scale-[1.16] lg:scale-[1.22]"
+          style={{
+            width: "100%",
+            height: "100%",
+            objectFit: "cover",
+          }}
+        />
+      </div>
 
-      {/* Dark overlay for contrast */}
-      <div className="absolute inset-0 bg-black/20" />
+      {/* Contrast overlay */}
+      <div className="absolute z-10 inset-0 bg-black/20" />
 
       {/* Blur overlay after video ends */}
       <div
@@ -41,7 +47,7 @@ const Hero = () => {
       </div>
 
       {/* Content */}
-      <div className="relative z-10 flex h-full items-center justify-center px-6">
+      <div className="relative z-20 flex h-full items-center justify-center px-6">
         <div
           className={`text-center transition-all duration-500 ${
             ended

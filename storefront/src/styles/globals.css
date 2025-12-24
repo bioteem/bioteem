@@ -133,3 +133,6 @@ mux-player.mux-no-controls video {
   object-fit: cover !important;
   object-position: center !important;
 }
+mux-player.mux-hero {
+  --controls: none;
+}
