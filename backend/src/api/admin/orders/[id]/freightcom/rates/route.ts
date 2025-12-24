@@ -90,26 +90,19 @@ async function freightcomRequest(
 }
 
 
-
 function round2(n: number) {
   return Math.round(n * 100) / 100
 }
-
-// g -> lb
+function round1(n: number) {
+  return Math.round(n * 10) / 10
+}
 function gToLb(g: number) {
   return g / 453.59237
 }
-
-// cm -> in
 function cmToIn(cm: number) {
   return cm / 2.54
 }
 
-/**
- * Builds Freightcom "packages" from Medusa order items.
- * Strategy: one package per unit (simple & always valid).
- * Later we can merge into fewer packages.
- */
 function buildFreightcomPackages(order: any) {
   const DEFAULT_WEIGHT_G = Number(process.env.DEFAULT_ITEM_WEIGHT_G || 500)
   const DEFAULT_L_CM = Number(process.env.DEFAULT_ITEM_LENGTH_CM || 20)
@@ -128,9 +121,9 @@ function buildFreightcomPackages(order: any) {
     const Hcm = Number.isFinite(Number(v.height)) ? Number(v.height) : DEFAULT_H_CM
 
     const weightLb = Math.max(0.01, round2(gToLb(weightG)))
-    const Lin = Math.max(0.1, round2(cmToIn(Lcm)))
-    const Win = Math.max(0.1, round2(cmToIn(Wcm)))
-    const Hin = Math.max(0.1, round2(cmToIn(Hcm)))
+    const Lin = Math.max(0.1, round1(cmToIn(Lcm)))
+    const Win = Math.max(0.1, round1(cmToIn(Wcm)))
+    const Hin = Math.max(0.1, round1(cmToIn(Hcm)))
 
     for (let i = 0; i < qty; i++) {
       packages.push({
@@ -143,7 +136,7 @@ function buildFreightcomPackages(order: any) {
     }
   }
 
-  // Safety fallback
+  // Fallback (shouldn't happen, but safe)
   if (packages.length === 0) {
     packages.push({
       description: "Default package",
@@ -151,9 +144,9 @@ function buildFreightcomPackages(order: any) {
         weight: { unit: "lb", value: round2(gToLb(DEFAULT_WEIGHT_G)) },
         cuboid: {
           unit: "in",
-          l: round2(cmToIn(DEFAULT_L_CM)),
-          w: round2(cmToIn(DEFAULT_W_CM)),
-          h: round2(cmToIn(DEFAULT_H_CM)),
+          l: round1(cmToIn(DEFAULT_L_CM)),
+          w: round1(cmToIn(DEFAULT_W_CM)),
+          h: round1(cmToIn(DEFAULT_H_CM)),
         },
       },
     })
@@ -161,7 +154,6 @@ function buildFreightcomPackages(order: any) {
 
   return packages
 }
-
 
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   try{
@@ -251,7 +243,18 @@ if (!order) {
     receives_email_updates: true,
   }
 
-  const payload = { details: { expected_ship_date: getExpectedShipDate(), origin, destination, "packaging_type": "package",     packages: buildFreightcomPackages(order), } }
+  const payload = {
+  details: {
+    origin,
+    destination,
+    expected_ship_date: getExpectedShipDate(), // jsonDate
+    packaging_type: "package", // or env var
+    packaging_properties: {
+      packages: buildFreightcomPackages(order),
+    },
+  },
+}
+
 
   const created = await freightcomRequest("/rate", { method: "POST", body: payload })
   const rate_id = created?.rate_id
