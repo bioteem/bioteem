@@ -13,14 +13,15 @@ const stripe = new Stripe(process.env.STRIPE_API_KEY!, {
 // Optional fallbacks / config – set these in Railway
 const SUBSCRIPTIONS_SALES_CHANNEL_ID =
   process.env.SUBSCRIPTIONS_SALES_CHANNEL_ID || undefined
-const SUBSCRIPTIONS_REGION_ID =
-  process.env.SUBSCRIPTIONS_REGION_ID || undefined
+const SUBSCRIPTIONS_REGION_ID = process.env.SUBSCRIPTIONS_REGION_ID || undefined
 const SUBSCRIPTIONS_SHIPPING_OPTION_ID =
   process.env.SUBSCRIPTIONS_SHIPPING_OPTION_ID || undefined
 
 // System default payment provider id
 const SUBSCRIPTIONS_PAYMENT_PROVIDER_ID =
   process.env.SUBSCRIPTIONS_PAYMENT_PROVIDER_ID || "pp_system_default"
+
+type AnyObj = Record<string, any>
 
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   const sig = req.headers["stripe-signature"] as string | undefined
@@ -60,8 +61,35 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   )
 
   //
-  // Helper: find or create Medusa customer and attach stripe_customer_id
+  // Helpers
   //
+  const getFirstPriceIdFromStripeSub = (stripeSub: AnyObj): string | null => {
+    return stripeSub?.items?.data?.[0]?.price?.id ?? null
+  }
+
+  const normalizeCountryCode2 = (cc: string | null | undefined) => {
+    if (!cc) return null
+    const s = cc.toLowerCase().trim()
+    return s.length === 2 ? s : null
+  }
+
+  const extractStripeSubIdFromInvoice = (invoiceAny: AnyObj): string | null => {
+    let stripeSubId: string | null =
+      (invoiceAny.subscription as string | null) ?? null
+
+    if (!stripeSubId) {
+      const firstLine = invoiceAny.lines?.data?.[0]
+      stripeSubId =
+        (firstLine?.subscription as string | undefined) ??
+        (firstLine?.parent?.subscription_item_details?.subscription as
+          | string
+          | undefined) ??
+        null
+    }
+
+    return stripeSubId
+  }
+
   const ensureMedusaCustomer = async (opts: {
     email: string
     name: string
@@ -76,7 +104,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     let medusaCustomer = existingCustomer
 
     if (!medusaCustomer) {
-      const [first_name, ...rest] = name.split(" ")
+      const [first_name, ...rest] = (name || "").split(" ")
       const last_name = rest.join(" ") || null
 
       medusaCustomer = await customerModuleService.createCustomers({
@@ -94,10 +122,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         email
       )
     } else {
-      const metadata = (medusaCustomer.metadata || {}) as Record<
-        string,
-        unknown
-      >
+      const metadata = (medusaCustomer.metadata || {}) as Record<string, unknown>
       if (!metadata.stripe_customer_id) {
         await customerModuleService.updateCustomers(
           { id: medusaCustomer.id },
@@ -118,627 +143,617 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     return medusaCustomer
   }
 
-  switch (event.type) {
-    //
-    // 1) CHECKOUT SESSION COMPLETED → create subscription row
-    //
-    case "checkout.session.completed": {
-      const session = event.data.object as Stripe.Checkout.Session
+  const upsertSubscriptionFromStripeSub = async (stripeSub: AnyObj) => {
+    const stripeSubId = stripeSub.id as string
+    const stripeCustomerId = stripeSub.customer as string | null
 
-      if (session.mode !== "subscription") {
-        break
-      }
+    if (!stripeCustomerId) {
+      console.warn("[subscriptions] Stripe subscription missing customer id")
+      return null
+    }
 
-      const stripeSubId = session.subscription as string | null
-      const stripeCustomerId = session.customer as string | null
+    // Resolve customer details from Stripe (email/name/shipping)
+    const stripeCustomer = (await stripe.customers.retrieve(
+      stripeCustomerId
+    )) as AnyObj
 
-      if (!stripeSubId || !stripeCustomerId) {
-        console.warn(
-          "[subscriptions] checkout.session.completed missing subscription or customer"
-        )
-        break
-      }
+    const email = (stripeCustomer.email as string | null) ?? null
+    const name = (stripeCustomer.name as string) || ""
+    const shippingDetails = stripeCustomer.shipping || null
+    const addr = shippingDetails?.address || null
 
-      const customerDetails = session.customer_details
-      const shippingDetails = (session as any).shipping_details
-      const email = customerDetails?.email
-      const name = customerDetails?.name || ""
+    if (!email) {
+      console.warn("[subscriptions] Stripe customer has no email", stripeCustomerId)
+      return null
+    }
 
-      if (!email) {
-        console.warn(
-          "[subscriptions] checkout.session.completed has no email, cannot create Medusa customer"
-        )
-        break
-      }
+    const medusaCustomer = await ensureMedusaCustomer({
+      email,
+      name,
+      stripeCustomerId,
+    })
 
-      const medusaCustomer = await ensureMedusaCustomer({
-        email,
-        name,
-        stripeCustomerId,
-      })
+    const priceId = getFirstPriceIdFromStripeSub(stripeSub)
+    if (!priceId) {
+      console.warn("[subscriptions] Missing price id on Stripe subscription", stripeSubId)
+      return null
+    }
 
-      const stripeSub = (await stripe.subscriptions.retrieve(
-        stripeSubId
-      )) as any
+    const [plan] = await subscriptionModuleService.listSubscriptionPlans({
+      stripe_price_id: priceId,
+    })
 
-      const firstItem = stripeSub.items.data[0]
-      const priceId = firstItem?.price?.id
+    if (!plan) {
+      console.warn("[subscriptions] No SubscriptionPlan found for stripe_price_id", priceId)
+      return null
+    }
 
-      if (!priceId) {
-        console.warn(
-          "[subscriptions] checkout.session.completed: missing price id",
-          stripeSubId
-        )
-        break
-      }
+    const [existingSub] = await subscriptionModuleService.listSubscriptions({
+      stripe_subscription_id: stripeSubId,
+    })
 
-      console.log(
-        "[subscriptions] checkout.session.completed using price_id",
-        priceId
-      )
+    const payload = {
+      customer_id: medusaCustomer.id,
+      plan_id: plan.id,
+      stripe_customer_id: stripeCustomerId,
+      stripe_subscription_id: stripeSubId,
+      stripe_latest_invoice_id: (stripeSub.latest_invoice as string | null) ?? null,
+      status: stripeSub.status as any,
+      current_period_start: stripeSub.current_period_start
+        ? new Date(stripeSub.current_period_start * 1000)
+        : null,
+      current_period_end: stripeSub.current_period_end
+        ? new Date(stripeSub.current_period_end * 1000)
+        : null,
 
-      const [plan] = await subscriptionModuleService.listSubscriptionPlans({
-        stripe_price_id: priceId,
-      })
+      billing_email: email,
 
-      if (!plan) {
-        console.warn(
-          "[subscriptions] No SubscriptionPlan found for stripe_price_id",
-          priceId
-        )
-        break
-      }
+      shipping_name: shippingDetails?.name || null,
+      shipping_phone: shippingDetails?.phone || null,
+      shipping_address_line1: addr?.line1 || null,
+      shipping_address_line2: addr?.line2 || null,
+      shipping_city: addr?.city || null,
+      shipping_province: addr?.state || null,
+      shipping_postal_code: addr?.postal_code || null,
+      shipping_country: addr?.country || null,
+    }
 
-      console.log("[subscriptions] Matched SubscriptionPlan", {
-        plan_id: plan.id,
-        product_id: plan.product_id,
-      })
-
-      // Idempotency
-      const [existingSub] = await subscriptionModuleService.listSubscriptions({
-        stripe_subscription_id: stripeSub.id,
-      })
-
-      if (existingSub) {
-        console.log(
-          "[subscriptions] Subscription already exists, skipping create:",
-          stripeSub.id
-        )
-        break
-      }
-
-      const addr = shippingDetails?.address || customerDetails?.address || null
-
-      const subscription = await subscriptionModuleService.createSubscriptions({
-        customer_id: medusaCustomer.id,
-        plan_id: plan.id,
-        stripe_customer_id: stripeCustomerId,
-        stripe_subscription_id: stripeSub.id,
-        stripe_latest_invoice_id: stripeSub.latest_invoice as string | null,
-        status: stripeSub.status as any,
-        current_period_start: stripeSub.current_period_start
-          ? new Date(stripeSub.current_period_start * 1000)
-          : null,
-        current_period_end: stripeSub.current_period_end
-          ? new Date(stripeSub.current_period_end * 1000)
-          : null,
-
-        billing_email: email,
-
-        shipping_name: shippingDetails?.name || null,
-        shipping_phone: shippingDetails?.phone || null,
-
-        shipping_address_line1: addr?.line1 || null,
-        shipping_address_line2: addr?.line2 || null,
-        shipping_city: addr?.city || null,
-        shipping_province: addr?.state || null,
-        shipping_postal_code: addr?.postal_code || null,
-        shipping_country: addr?.country || null,
-
+    if (!existingSub) {
+      const created = await subscriptionModuleService.createSubscriptions({
+        ...payload,
         last_order_id: null,
         last_order_created_at: null,
       })
 
-      console.log(
-        "[subscriptions] Created subscription from checkout.session.completed",
-        subscription.id,
-        "plan",
-        plan.id
-      )
-
-      break
+      console.log("[subscriptions] Created subscription", created.id, "plan", plan.id)
+      return created
     }
 
-    //
-    // 2) SAFETY NET: customer.subscription.created
-    //
-    case "customer.subscription.created": {
-      const stripeSub = event.data.object as any
-      const stripeCustomerId = stripeSub.customer as string | null
-
-      if (!stripeCustomerId) {
-        console.warn(
-          "[subscriptions] customer.subscription.created missing customer id"
-        )
-        break
-      }
-
-      const [existingSub] = await subscriptionModuleService.listSubscriptions({
-        stripe_subscription_id: stripeSub.id,
-      })
-      if (existingSub) {
-        console.log(
-          "[subscriptions] customer.subscription.created: subscription already exists, skipping"
-        )
-        break
-      }
-
-      const stripeCustomer = (await stripe.customers.retrieve(
-        stripeCustomerId
-      )) as any
-
-      const email = stripeCustomer.email as string | null
-      const name = (stripeCustomer.name as string) || ""
-      const shippingDetails = stripeCustomer.shipping || null
-
-      if (!email) {
-        console.warn(
-          "[subscriptions] customer.subscription.created has no email"
-        )
-        break
-      }
-
-      const medusaCustomer = await ensureMedusaCustomer({
-        email,
-        name,
-        stripeCustomerId,
-      })
-
-      const firstItem = stripeSub.items?.data?.[0]
-      const priceId = firstItem?.price?.id
-
-      if (!priceId) {
-        console.warn(
-          "[subscriptions] customer.subscription.created: missing price id",
-          stripeSub.id
-        )
-        break
-      }
-
-      console.log(
-        "[subscriptions] customer.subscription.created using price_id",
-        priceId
-      )
-
-      const [plan] = await subscriptionModuleService.listSubscriptionPlans({
-        stripe_price_id: priceId,
-      })
-
-      if (!plan) {
-        console.warn(
-          "[subscriptions] customer.subscription.created: No plan for price_id",
-          priceId
-        )
-        break
-      }
-
-      console.log("[subscriptions] Matched SubscriptionPlan", {
-        plan_id: plan.id,
-        product_id: plan.product_id,
-      })
-
-      const addr = shippingDetails?.address || null
-
-      const subscription = await subscriptionModuleService.createSubscriptions({
-        customer_id: medusaCustomer.id,
-        plan_id: plan.id,
-        stripe_customer_id: stripeCustomerId,
-        stripe_subscription_id: stripeSub.id,
-        stripe_latest_invoice_id: stripeSub.latest_invoice as string | null,
-        status: stripeSub.status as any,
-        current_period_start: stripeSub.current_period_start
-          ? new Date(stripeSub.current_period_start * 1000)
-          : null,
-        current_period_end: stripeSub.current_period_end
-          ? new Date(stripeSub.current_period_end * 1000)
-          : null,
-
-        billing_email: email,
-
-        shipping_name: shippingDetails?.name || null,
-        shipping_phone: shippingDetails?.phone || null,
-
-        shipping_address_line1: addr?.line1 || null,
-        shipping_address_line2: addr?.line2 || null,
-        shipping_city: addr?.city || null,
-        shipping_province: addr?.state || null,
-        shipping_postal_code: addr?.postal_code || null,
-        shipping_country: addr?.country || null,
-
-        last_order_id: null,
-        last_order_created_at: null,
-      })
-
-      console.log(
-        "[subscriptions] Created subscription from customer.subscription.created",
-        subscription.id,
-        "plan",
-        plan.id
-      )
-
-      break
-    }
-
-    //
-    // 3) INVOICE PAYMENT SUCCEEDED → use cart workflow to create order
-    //
-    case "invoice.payment_succeeded": {
-      const invoiceAny = event.data.object as any
-
-      const reason = invoiceAny.billing_reason
-      if (
-        reason !== "subscription_create" &&
-        reason !== "subscription_cycle"
-      ) {
-        break
-      }
-
-      // Stripe subscription id on invoice
-      let stripeSubId: string | null =
-        (invoiceAny.subscription as string | null) ?? null
-
-      if (!stripeSubId) {
-        const firstLine = invoiceAny.lines?.data?.[0]
-        stripeSubId =
-          (firstLine?.subscription as string | undefined) ??
-          (firstLine?.parent?.subscription_item_details?.subscription as
-            string | undefined) ??
-          null
-      }
-
-      if (!stripeSubId) {
-        console.warn(
-          "[subscriptions] invoice.payment_succeeded missing subscription id",
-          { invoice_id: invoiceAny.id, billing_reason: invoiceAny.billing_reason }
-        )
-        break
-      }
-
-      const [sub] = await subscriptionModuleService.listSubscriptions({
-        stripe_subscription_id: stripeSubId,
-      })
-
-      if (!sub) {
-        console.warn(
-          "[subscriptions] invoice.payment_succeeded for unknown subscription",
-          stripeSubId
-        )
-        break
-      }
-
-      // Idempotency: already processed this invoice?
-      if (sub.stripe_latest_invoice_id === invoiceAny.id && sub.last_order_id) {
-        console.log(
-          "[subscriptions] Invoice already processed for subscription",
-          sub.id,
-          "invoice",
-          invoiceAny.id
-        )
-        break
-      }
-
-      const [plan] = await subscriptionModuleService.listSubscriptionPlans({
-        id: sub.plan_id,
-      })
-
-      if (!plan) {
-        console.warn(
-          "[subscriptions] Subscription has no plan for plan_id",
-          sub.plan_id
-        )
-        break
-      }
-
-      console.log("[subscriptions] invoice.payment_succeeded plan info", {
-        plan_id: plan.id,
-        product_id: plan.product_id,
-      })
-
-      const firstLine = invoiceAny.lines?.data?.[0]
-      const period = firstLine?.period
-
-      // Price from Stripe (cents → major) – used for metadata and sanity,
-      // but the actual line-item price will come from the variant / price list.
-      let stripeUnitAmountCents: number | null =
-        firstLine?.price?.unit_amount ?? null
-
-      if (
-        stripeUnitAmountCents == null &&
-        typeof invoiceAny.amount_paid === "number"
-      ) {
-        const qty = firstLine?.quantity ?? 1
-        stripeUnitAmountCents = Math.round(invoiceAny.amount_paid / qty)
-      }
-
-      if (stripeUnitAmountCents == null) {
-        console.warn(
-          "[subscriptions] Could not determine Stripe unit amount for invoice",
-          invoiceAny.id
-        )
-        break
-      }
-
-      const unitPriceFromStripe = Math.round(stripeUnitAmountCents / 100)
-      const currency = (invoiceAny.currency as string).toLowerCase()
-
-      let createdOrder: any | null = null
-
-      try {
-        const productModule = req.scope.resolve<any>(Modules.PRODUCT)
-        const regionModule = req.scope.resolve<any>(Modules.REGION)
-        const cartModule = req.scope.resolve<any>(Modules.CART)
-        const orderModule = req.scope.resolve<any>(Modules.ORDER)
-
-        // Import core flows at runtime to avoid circular deps
-        const coreFlows = await import("@medusajs/medusa/core-flows")
-const { addToCartWorkflow } = coreFlows
-const { createPaymentCollectionForCartWorkflow } = coreFlows
-const { createPaymentSessionsWorkflow } = coreFlows
-const { completeCartWorkflow } = coreFlows
-const { addShippingMethodToCartWorkflow } = coreFlows
-
-
-
-        // 1) Load product + variant
-        const product = await productModule.retrieveProduct(plan.product_id, {
-          relations: ["variants"],
-        })
-
-        if (!product || !Array.isArray(product.variants) || !product.variants.length) {
-          throw new Error(
-            `Product ${plan.product_id} has no variants – cannot create cart`
-          )
-        }
-
-        const variantId: string = product.variants[0].id
-        let salesChannelId: string | undefined = undefined
-        let regionId: string | undefined = undefined
-
-        if (SUBSCRIPTIONS_SALES_CHANNEL_ID) {
-          salesChannelId = SUBSCRIPTIONS_SALES_CHANNEL_ID
-        }
-
-        // 2) Resolve region (by shipping country, fallback to env, then first region)
-        const countryCode = sub.shipping_country?.toLowerCase()
-
-        if (countryCode) {
-          const regions = await regionModule.listRegions({
-            countries: { iso_2: countryCode },
-          })
-          if (regions?.length) {
-            regionId = regions[0].id
-            console.log(
-              "[subscriptions] Found region for country",
-              countryCode,
-              "->",
-              regionId
-            )
-          }
-        }
-
-        if (!regionId && SUBSCRIPTIONS_REGION_ID) {
-          regionId = SUBSCRIPTIONS_REGION_ID
-          console.log("[subscriptions] Using fallback region", regionId)
-        }
-
-        if (!regionId) {
-          const allRegions = await regionModule.listRegions({ take: 1 })
-          if (allRegions?.length) {
-            regionId = allRegions[0].id
-            console.log(
-              "[subscriptions] Using first available region",
-              regionId
-            )
-          }
-        }
-
-        if (!regionId) {
-          throw new Error(
-            "No region found – set SUBSCRIPTIONS_REGION_ID or ensure region supports the shipping country"
-          )
-        }
-
-        let validCountryCode = countryCode
-        if (!validCountryCode || validCountryCode.length !== 2) {
-          validCountryCode = "us"
-        }
-
-        // 3) Create cart (with shipping address + optional shipping method)
-        const cartInput: any = {
-          region_id: regionId,
-          sales_channel_id: salesChannelId,
-          email: sub.billing_email ?? undefined,
-          customer_id: sub.customer_id,
-          currency_code: currency,
-
-          shipping_address: {
-            first_name: sub.shipping_name ?? "Subscriber",
-            last_name: undefined,
-            phone: sub.shipping_phone ?? undefined,
-            address_1: sub.shipping_address_line1 ?? undefined,
-            address_2: sub.shipping_address_line2 ?? undefined,
-            city: sub.shipping_city ?? undefined,
-            province: sub.shipping_province ?? undefined,
-            postal_code: sub.shipping_postal_code ?? undefined,
-            country_code: validCountryCode,
-          },
-
-          metadata: {
-            source: "subscription",                 // ✅ add this
-            is_subscription_order: true,  
-            subscription_id: sub.id,
-            stripe_subscription_id: stripeSubId,
-            stripe_invoice_id: invoiceAny.id,
-            stripe_customer_id: sub.stripe_customer_id,
-            subscription_plan_name: plan.name,
-            stripe_unit_price: unitPriceFromStripe,
-          },
-        }
-
-      
-
-        const cart = await cartModule.createCarts(cartInput)
-
-        console.log(
-          "[subscriptions] Created cart",
-          cart.id,
-          "for subscription",
-          sub.id
-        )
-
-        // 4) Add subscription line item (using standard addToCartWorkflow)
-        await addToCartWorkflow(req.scope).run({
-          input: {
-            cart_id: cart.id,
-            items: [
-              {
-                variant_id: variantId,
-                quantity: 1,
-                // NOTE: we are not overriding price here; Medusa will use the
-                // variant's price. If you want the exact Stripe price, we can
-                // later introduce a custom add-to-cart workflow that sets
-                // is_custom_price + unit_price.
-              },
-            ],
-          },
-        })
-
-        console.log(
-          "[subscriptions] Added variant to cart",
-          variantId,
-          "cart",
-          cart.id
-        )
-// 4b) Attach shipping method to cart (required for shippable items)
-if (SUBSCRIPTIONS_SHIPPING_OPTION_ID) {
-await addShippingMethodToCartWorkflow(req.scope).run({
-  input: {
-    cart_id: cart.id,
-    options: [{ id: SUBSCRIPTIONS_SHIPPING_OPTION_ID }],
-  },
-})
-
-  console.log(
-    "[subscriptions] Attached shipping method",
-    SUBSCRIPTIONS_SHIPPING_OPTION_ID,
-    "to cart",
-    cart.id
-  )
-}
-        // 5) Create payment collection + payment session (system default)
-        const { result: paymentCollection } =
-          await createPaymentCollectionForCartWorkflow(req.scope).run({
-            input: {
-              cart_id: cart.id,
-            },
-          })
-
-        await createPaymentSessionsWorkflow(req.scope).run({
-          input: {
-            payment_collection_id: paymentCollection.id,
-            provider_id: SUBSCRIPTIONS_PAYMENT_PROVIDER_ID,
-            data: {
-              stripe_invoice_id: invoiceAny.id,
-              stripe_subscription_id: stripeSubId,
-              already_paid: true,
-            },
-          },
-        })
-
-        console.log(
-          "[subscriptions] Created payment collection + session for cart",
-          cart.id
-        )
-
-        // 6) Complete cart → creates order + reservations + payment
-        const { result: completed } = await completeCartWorkflow(
-          req.scope
-        ).run({
-          input: {
-            id: cart.id,
-          },
-        })
-
-        createdOrder = completed
-      if (createdOrder?.id) {
-  try {
-    const existingOrderMetadata =
-      (createdOrder.metadata || {}) as Record<string, any>
-
-    await orderModule.updateOrders(
-      { id: createdOrder.id },
+    await subscriptionModuleService.updateSubscriptions(
+      { id: existingSub.id },
       {
-        metadata: {
-          ...existingOrderMetadata,
-          source: "subscription",
-          is_subscription_order: true,
-          subscription_id: sub.id,
-          stripe_subscription_id: stripeSubId,
-          stripe_invoice_id: invoiceAny.id,
-          stripe_customer_id: sub.stripe_customer_id,
-        },
+        ...payload,
+        // preserve last_order_id fields
+        last_order_id: existingSub.last_order_id,
+        last_order_created_at: existingSub.last_order_created_at,
       }
     )
 
-    console.log("[subscriptions] Tagged order as subscription", createdOrder.id)
-  } catch (e) {
-    console.warn("[subscriptions] Failed to tag order metadata", createdOrder.id, e)
+    console.log(
+      "[subscriptions] Updated subscription from Stripe update",
+      existingSub.id,
+      "plan",
+      plan.id,
+      "status",
+      stripeSub.status
+    )
+
+    // Return the refreshed record (optional)
+    const [updated] = await subscriptionModuleService.listSubscriptions({
+      id: existingSub.id,
+    })
+    return updated || existingSub
   }
-}
 
-        console.log(
-          "[subscriptions] Created order via cart workflow",
-          createdOrder?.id,
-          "for subscription",
-          sub.id,
-          "invoice",
-          invoiceAny.id
-        )
-      } catch (err) {
-        console.error(
-          "[subscriptions] Failed to create order via cart workflow",
-          sub.id,
-          "invoice",
-          invoiceAny.id,
-          err
-        )
-      }
+  const tagOrderAsSubscription = async (opts: {
+    orderModule: any
+    order: AnyObj
+    sub: AnyObj
+    stripeSubId: string
+    stripeCustomerId: string | null
+    stripeInvoiceId: string
+  }) => {
+    const { orderModule, order, sub, stripeSubId, stripeCustomerId, stripeInvoiceId } =
+      opts
 
-      // 7) Update subscription regardless of whether order succeeded
-      await subscriptionModuleService.updateSubscriptions(
-        { id: sub.id },
+    if (!order?.id) return
+
+    try {
+      const existingOrderMetadata = (order.metadata || {}) as Record<string, any>
+
+      await orderModule.updateOrders(
+        { id: order.id },
         {
-          stripe_latest_invoice_id: invoiceAny.id,
-          status: "active",
-          current_period_start: period
-            ? new Date(period.start * 1000)
-            : sub.current_period_start,
-          current_period_end: period
-            ? new Date(period.end * 1000)
-            : sub.current_period_end,
-          last_order_id: createdOrder?.id ?? sub.last_order_id,
-          last_order_created_at: createdOrder
-            ? new Date()
-            : sub.last_order_created_at,
+          metadata: {
+            ...existingOrderMetadata,
+            source: "subscription",
+            is_subscription_order: true,
+            subscription_id: sub.id,
+            stripe_subscription_id: stripeSubId,
+            stripe_invoice_id: stripeInvoiceId,
+            stripe_customer_id: stripeCustomerId ?? sub.stripe_customer_id ?? null,
+          },
         }
       )
 
-      break
+      console.log("[subscriptions] Tagged order as subscription", order.id)
+    } catch (e) {
+      console.warn("[subscriptions] Failed to tag order metadata", order?.id, e)
     }
+  }
 
-    default: {
-      break
+  //
+  // Main switch
+  //
+  try {
+    switch (event.type) {
+      //
+      // 1) CHECKOUT SESSION COMPLETED → create subscription row
+      //
+      case "checkout.session.completed": {
+        const session = event.data.object as Stripe.Checkout.Session
+
+        if (session.mode !== "subscription") break
+
+        const stripeSubId = session.subscription as string | null
+        const stripeCustomerId = session.customer as string | null
+
+        if (!stripeSubId || !stripeCustomerId) {
+          console.warn(
+            "[subscriptions] checkout.session.completed missing subscription or customer"
+          )
+          break
+        }
+
+        const customerDetails = session.customer_details
+        const shippingDetails = (session as any).shipping_details
+        const email = customerDetails?.email
+        const name = customerDetails?.name || ""
+
+        if (!email) {
+          console.warn(
+            "[subscriptions] checkout.session.completed has no email, cannot create Medusa customer"
+          )
+          break
+        }
+
+        await ensureMedusaCustomer({ email, name, stripeCustomerId })
+
+        const stripeSub = (await stripe.subscriptions.retrieve(stripeSubId)) as AnyObj
+        // Create if missing / update if exists (handles idempotency + correct plan)
+        await upsertSubscriptionFromStripeSub(stripeSub)
+
+        break
+      }
+
+      //
+      // 2) SAFETY NET: customer.subscription.created
+      //
+      case "customer.subscription.created": {
+        const stripeSub = event.data.object as AnyObj
+        // Create/update based on Stripe subscription payload
+        await upsertSubscriptionFromStripeSub(stripeSub)
+        break
+      }
+
+      //
+      // 3) KEEP IN SYNC: customer.subscription.updated (plan changes, status changes, etc.)
+      //
+      case "customer.subscription.updated": {
+        const stripeSub = event.data.object as AnyObj
+        await upsertSubscriptionFromStripeSub(stripeSub)
+        break
+      }
+
+      //
+      // 4) CANCELLATION: customer.subscription.deleted
+      //
+      case "customer.subscription.deleted": {
+        const stripeSub = event.data.object as AnyObj
+        const stripeSubId = stripeSub.id as string
+
+        const [sub] = await subscriptionModuleService.listSubscriptions({
+          stripe_subscription_id: stripeSubId,
+        })
+
+        if (!sub) {
+          console.warn(
+            "[subscriptions] customer.subscription.deleted for unknown subscription",
+            stripeSubId
+          )
+          break
+        }
+
+        await subscriptionModuleService.updateSubscriptions(
+          { id: sub.id },
+          {
+            status: "canceled" as any,
+            stripe_latest_invoice_id: (stripeSub.latest_invoice as string | null) ?? sub.stripe_latest_invoice_id,
+            current_period_start: stripeSub.current_period_start
+              ? new Date(stripeSub.current_period_start * 1000)
+              : sub.current_period_start,
+            current_period_end: stripeSub.current_period_end
+              ? new Date(stripeSub.current_period_end * 1000)
+              : sub.current_period_end,
+          }
+        )
+
+        console.log("[subscriptions] Marked subscription canceled", sub.id)
+        break
+      }
+
+      //
+      // 5) INVOICE PAYMENT SUCCEEDED → create order via cart workflow
+      //    Handles:
+      //      - subscription_create
+      //      - subscription_cycle
+      //      - subscription_update  (plan upgrades/downgrades that charge)
+      //
+      case "invoice.payment_succeeded": {
+        const invoiceAny = event.data.object as AnyObj
+        const reason = invoiceAny.billing_reason
+
+        if (
+          reason !== "subscription_create" &&
+          reason !== "subscription_cycle" &&
+          reason !== "subscription_update"
+        ) {
+          break
+        }
+
+        const stripeSubId = extractStripeSubIdFromInvoice(invoiceAny)
+        if (!stripeSubId) {
+          console.warn("[subscriptions] invoice.payment_succeeded missing subscription id", {
+            invoice_id: invoiceAny.id,
+            billing_reason: invoiceAny.billing_reason,
+          })
+          break
+        }
+
+        // Ensure our subscription row is in sync with Stripe (important for plan changes)
+        let stripeSub: AnyObj | null = null
+        try {
+          stripeSub = (await stripe.subscriptions.retrieve(stripeSubId)) as AnyObj
+          await upsertSubscriptionFromStripeSub(stripeSub)
+        } catch (e) {
+          console.warn("[subscriptions] Could not refresh Stripe subscription during invoice", stripeSubId, e)
+        }
+
+        const [sub] = await subscriptionModuleService.listSubscriptions({
+          stripe_subscription_id: stripeSubId,
+        })
+
+        if (!sub) {
+          console.warn(
+            "[subscriptions] invoice.payment_succeeded for unknown subscription",
+            stripeSubId
+          )
+          break
+        }
+
+        // Idempotency: already processed this invoice?
+        if (sub.stripe_latest_invoice_id === invoiceAny.id && sub.last_order_id) {
+          console.log(
+            "[subscriptions] Invoice already processed for subscription",
+            sub.id,
+            "invoice",
+            invoiceAny.id
+          )
+          break
+        }
+
+        // Prefer plan derived from Stripe subscription price id (plan might have changed)
+        let planIdToUse = sub.plan_id
+        if (stripeSub) {
+          const priceId = getFirstPriceIdFromStripeSub(stripeSub)
+          if (priceId) {
+            const [planFromStripe] =
+              await subscriptionModuleService.listSubscriptionPlans({
+                stripe_price_id: priceId,
+              })
+            if (planFromStripe?.id) planIdToUse = planFromStripe.id
+          }
+        }
+
+        const [plan] = await subscriptionModuleService.listSubscriptionPlans({
+          id: planIdToUse,
+        })
+
+        if (!plan) {
+          console.warn("[subscriptions] Subscription has no plan for plan_id", planIdToUse)
+          break
+        }
+
+        const firstLine = invoiceAny.lines?.data?.[0]
+        const period = firstLine?.period
+
+        let stripeUnitAmountCents: number | null =
+          firstLine?.price?.unit_amount ?? null
+
+        if (
+          stripeUnitAmountCents == null &&
+          typeof invoiceAny.amount_paid === "number"
+        ) {
+          const qty = firstLine?.quantity ?? 1
+          stripeUnitAmountCents = Math.round(invoiceAny.amount_paid / qty)
+        }
+
+        if (stripeUnitAmountCents == null) {
+          console.warn(
+            "[subscriptions] Could not determine Stripe unit amount for invoice",
+            invoiceAny.id
+          )
+          break
+        }
+
+        const unitPriceFromStripe = Math.round(stripeUnitAmountCents / 100)
+        const currency = (invoiceAny.currency as string).toLowerCase()
+
+        let createdOrder: AnyObj | null = null
+
+        try {
+          const productModule = req.scope.resolve<any>(Modules.PRODUCT)
+          const regionModule = req.scope.resolve<any>(Modules.REGION)
+          const cartModule = req.scope.resolve<any>(Modules.CART)
+          const orderModule = req.scope.resolve<any>(Modules.ORDER)
+
+          // Import core flows at runtime to avoid circular deps
+          const coreFlows = await import("@medusajs/medusa/core-flows")
+          const { addToCartWorkflow } = coreFlows
+          const { createPaymentCollectionForCartWorkflow } = coreFlows
+          const { createPaymentSessionsWorkflow } = coreFlows
+          const { completeCartWorkflow } = coreFlows
+          const { addShippingMethodToCartWorkflow } = coreFlows
+
+          // 1) Load product + variant
+          const product = await productModule.retrieveProduct(plan.product_id, {
+            relations: ["variants"],
+          })
+
+          if (
+            !product ||
+            !Array.isArray(product.variants) ||
+            !product.variants.length
+          ) {
+            throw new Error(
+              `Product ${plan.product_id} has no variants – cannot create cart`
+            )
+          }
+
+          const variantId: string = product.variants[0].id
+          const salesChannelId: string | undefined = SUBSCRIPTIONS_SALES_CHANNEL_ID
+
+          // 2) Resolve region (by shipping country, fallback to env, then first region)
+          const countryCode = normalizeCountryCode2(sub.shipping_country)
+
+          let regionId: string | undefined = undefined
+
+          if (countryCode) {
+            const regions = await regionModule.listRegions({
+              countries: { iso_2: countryCode },
+            })
+            if (regions?.length) {
+              regionId = regions[0].id
+              console.log(
+                "[subscriptions] Found region for country",
+                countryCode,
+                "->",
+                regionId
+              )
+            }
+          }
+
+          if (!regionId && SUBSCRIPTIONS_REGION_ID) {
+            regionId = SUBSCRIPTIONS_REGION_ID
+            console.log("[subscriptions] Using fallback region", regionId)
+          }
+
+          if (!regionId) {
+            const allRegions = await regionModule.listRegions({ take: 1 })
+            if (allRegions?.length) {
+              regionId = allRegions[0].id
+              console.log("[subscriptions] Using first available region", regionId)
+            }
+          }
+
+          if (!regionId) {
+            throw new Error(
+              "No region found – set SUBSCRIPTIONS_REGION_ID or ensure region supports the shipping country"
+            )
+          }
+
+          const validCountryCode = countryCode ?? "us"
+
+          // 3) Create cart
+          const cartInput: AnyObj = {
+            region_id: regionId,
+            sales_channel_id: salesChannelId,
+            email: sub.billing_email ?? undefined,
+            customer_id: sub.customer_id,
+            currency_code: currency,
+
+            shipping_address: {
+              first_name: sub.shipping_name ?? "Subscriber",
+              last_name: undefined,
+              phone: sub.shipping_phone ?? undefined,
+              address_1: sub.shipping_address_line1 ?? undefined,
+              address_2: sub.shipping_address_line2 ?? undefined,
+              city: sub.shipping_city ?? undefined,
+              province: sub.shipping_province ?? undefined,
+              postal_code: sub.shipping_postal_code ?? undefined,
+              country_code: validCountryCode,
+            },
+
+            metadata: {
+              // ✅ used by frontend filter
+              source: "subscription",
+              is_subscription_order: true,
+
+              subscription_id: sub.id,
+              stripe_subscription_id: stripeSubId,
+              stripe_invoice_id: invoiceAny.id,
+              stripe_customer_id: sub.stripe_customer_id,
+              subscription_plan_name: plan.name,
+              stripe_unit_price: unitPriceFromStripe,
+            },
+          }
+
+          const cart = await cartModule.createCarts(cartInput)
+
+          console.log("[subscriptions] Created cart", cart.id, "for subscription", sub.id)
+
+          // 4) Add subscription line item
+          await addToCartWorkflow(req.scope).run({
+            input: {
+              cart_id: cart.id,
+              items: [{ variant_id: variantId, quantity: 1 }],
+            },
+          })
+
+          console.log("[subscriptions] Added variant to cart", variantId, "cart", cart.id)
+
+          // 4b) Attach shipping method (required for shippable items)
+          if (SUBSCRIPTIONS_SHIPPING_OPTION_ID) {
+            await addShippingMethodToCartWorkflow(req.scope).run({
+              input: {
+                cart_id: cart.id,
+                options: [{ id: SUBSCRIPTIONS_SHIPPING_OPTION_ID }],
+              },
+            })
+
+            console.log(
+              "[subscriptions] Attached shipping method",
+              SUBSCRIPTIONS_SHIPPING_OPTION_ID,
+              "to cart",
+              cart.id
+            )
+          }
+
+          // 5) Payment collection + session
+          const { result: paymentCollection } =
+            await createPaymentCollectionForCartWorkflow(req.scope).run({
+              input: { cart_id: cart.id },
+            })
+
+          await createPaymentSessionsWorkflow(req.scope).run({
+            input: {
+              payment_collection_id: paymentCollection.id,
+              provider_id: SUBSCRIPTIONS_PAYMENT_PROVIDER_ID,
+              data: {
+                stripe_invoice_id: invoiceAny.id,
+                stripe_subscription_id: stripeSubId,
+                already_paid: true,
+              },
+            },
+          })
+
+          console.log("[subscriptions] Created payment collection + session for cart", cart.id)
+
+          // 6) Complete cart → creates order
+          const { result: completed } = await completeCartWorkflow(req.scope).run({
+            input: { id: cart.id },
+          })
+
+          createdOrder = completed
+
+          console.log(
+            "[subscriptions] Created order via cart workflow",
+            createdOrder?.id,
+            "for subscription",
+            sub.id,
+            "invoice",
+            invoiceAny.id
+          )
+
+          // ✅ Force-tag the order (guarantees it exists even if cart->order metadata differs)
+          await tagOrderAsSubscription({
+            orderModule,
+            order: createdOrder,
+            sub,
+            stripeSubId,
+            stripeCustomerId: sub.stripe_customer_id,
+            stripeInvoiceId: invoiceAny.id,
+          })
+        } catch (err) {
+          console.error(
+            "[subscriptions] Failed to create order via cart workflow",
+            sub.id,
+            "invoice",
+            invoiceAny.id,
+            err
+          )
+        }
+
+        // 7) Update subscription regardless
+        await subscriptionModuleService.updateSubscriptions(
+          { id: sub.id },
+          {
+            stripe_latest_invoice_id: invoiceAny.id,
+            status: "active" as any,
+            // if plan changed, store it
+            plan_id: plan.id,
+            current_period_start: period
+              ? new Date(period.start * 1000)
+              : sub.current_period_start,
+            current_period_end: period
+              ? new Date(period.end * 1000)
+              : sub.current_period_end,
+            last_order_id: createdOrder?.id ?? sub.last_order_id,
+            last_order_created_at: createdOrder
+              ? new Date()
+              : sub.last_order_created_at,
+          }
+        )
+
+        break
+      }
+
+      //
+      // 6) INVOICE PAYMENT FAILED → mark subscription as past_due (or whatever you prefer)
+      //
+      case "invoice.payment_failed": {
+        const invoiceAny = event.data.object as AnyObj
+        const stripeSubId = extractStripeSubIdFromInvoice(invoiceAny)
+
+        if (!stripeSubId) break
+
+        const [sub] = await subscriptionModuleService.listSubscriptions({
+          stripe_subscription_id: stripeSubId,
+        })
+
+        if (!sub) break
+
+        await subscriptionModuleService.updateSubscriptions(
+          { id: sub.id },
+          {
+            status: "past_due" as any,
+            stripe_latest_invoice_id: invoiceAny.id ?? sub.stripe_latest_invoice_id,
+          }
+        )
+
+        console.log("[subscriptions] Marked subscription past_due", sub.id)
+        break
+      }
+
+      default: {
+        break
+      }
     }
+  } catch (e) {
+    console.error("[subscriptions] Unhandled webhook processing error", event.type, e)
+    // Still return 200 to Stripe only if you truly want to swallow errors.
+    // Usually better to return 500 so Stripe retries.
+    return res.status(500).json({ received: true, error: "webhook_failed" })
   }
 
   return res.json({ received: true })
