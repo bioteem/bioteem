@@ -16,7 +16,6 @@ const Hero = () => {
       <div className="absolute inset-0">
         <MuxBackgroundVideo
           src={streamSrc}
-          className="h-full w-full"
         >
           <img
             src={posterSrc}
@@ -26,12 +25,12 @@ const Hero = () => {
         </MuxBackgroundVideo>
       </div>
 
-      {/* Blur overlay (always on) */}
-      <div className="absolute inset-0 z-10">
+
+      {/* <div className="absolute inset-0 z-10">
         <div className="absolute inset-0 backdrop-blur-md bg-black/25" />
       </div>
 
-      {/* Content */}
+
       <div className="relative z-20 flex h-full items-center justify-center px-6">
         <div className="text-center">
           <Heading
@@ -47,7 +46,7 @@ const Hero = () => {
             </CTAButton>
           </div>
         </div>
-      </div>
+      </div> */}
     </section>
   )
 }
