@@ -1,38 +1,39 @@
 "use client"
 
-import { useState } from "react"
 import { Heading } from "@medusajs/ui"
 import CTAButton from "@modules/common/components/call-to-action-btn"
-import MuxPlayer from "@mux/mux-player-react"
-
-import { MuxBackgroundVideo } from '@mux/mux-background-video/react';
+import { MuxBackgroundVideo } from "@mux/mux-background-video/react"
 
 const PLAYBACK_ID = "cj6X00oNm01fVYgBK24HyXjvdbH8G01200Gf5vSD5Go7Fw4"
 
 const Hero = () => {
-  const [ended, setEnded] = useState(false)
+  const streamSrc = `https://stream.mux.com/${PLAYBACK_ID}.m3u8`
+  const posterSrc = `https://image.mux.com/${PLAYBACK_ID}/thumbnail.webp?time=0`
 
   return (
     <section className="relative w-full overflow-hidden bg-black h-[60vh] sm:h-[65vh] lg:h-[75vh]">
+      {/* Background video (fills the section) */}
+      <div className="absolute inset-0">
+        <MuxBackgroundVideo
+          src={streamSrc}
+          className="h-full w-full"
+        >
+          <img
+            src={posterSrc}
+            alt="Bioteem hero background"
+            className="h-full w-full object-cover"
+          />
+        </MuxBackgroundVideo>
+      </div>
 
-       <MuxBackgroundVideo src="https://stream.mux.com/cj6X00oNm01fVYgBK24HyXjvdbH8G01200Gf5vSD5Go7Fw4.m3u8">
-      <img src="https://image.mux.com/cj6X00oNm01fVYgBK24HyXjvdbH8G01200Gf5vSD5Go7Fw4/thumbnail.webp?time=0" alt="Mux Background Video" />
-    </MuxBackgroundVideo>
-      {/* Blur overlay after video ends */}
-      <div
-        className="absolute inset-0 transition-opacity duration-500 
-          opacity-100"
-        
-      >
+      {/* Blur overlay (always on) */}
+      <div className="absolute inset-0 z-10">
         <div className="absolute inset-0 backdrop-blur-md bg-black/25" />
       </div>
 
       {/* Content */}
       <div className="relative z-20 flex h-full items-center justify-center px-6">
-        <div
-          className="text-center transition-all duration-500 opacity-100 translate-y-0"
-
-        >
+        <div className="text-center">
           <Heading
             level="h1"
             className="text-3xl md:text-4xl font-normal text-white"
