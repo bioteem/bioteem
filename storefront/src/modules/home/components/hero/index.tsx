@@ -11,18 +11,22 @@ const Hero = () => {
   const [ended, setEnded] = useState(false)
 
   return (
-<section className="relative h-[75vh] w-full overflow-hidden bg-black">
-  <div className="absolute inset-0">
-    <MuxPlayer
-      playbackId={PLAYBACK_ID}
-      streamType="on-demand"
-      autoPlay
-      muted
-      playsInline
-      loop={false}
-      className="mux-hero h-full w-full"
-    />
-  </div>
+    <section className="relative h-[75vh] w-full overflow-hidden bg-black">
+      {/* Video background */}
+      <MuxPlayer
+        playbackId={PLAYBACK_ID}
+        streamType="on-demand"
+        autoPlay
+        muted
+        playsInline
+        loop={false}
+        preload="auto"
+        onEnded={() => setEnded(true)}
+        className="absolute inset-0 h-full w-full mux-no-controls pointer-events-none"
+        style={{
+          objectFit: "cover", // 🔑 removes black bars
+        }}
+      />
 
       {/* Dark overlay for contrast */}
       <div className="absolute inset-0 bg-black/20" />

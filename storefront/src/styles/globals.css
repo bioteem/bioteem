@@ -119,21 +119,17 @@
   }
 }
 
-/* Make mux-player behave like a true background */
-mux-player.mux-hero {
+/* Force the internal mux video to fill the hero (removes black bars) */
+mux-player.mux-no-controls {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
 }
 
-/* Force the actual <video> to cover */
-mux-player.mux-hero video {
+mux-player.mux-no-controls video {
   width: 100% !important;
   height: 100% !important;
   object-fit: cover !important;
   object-position: center !important;
-}
-mux-player.mux-hero {
-  --controls: none;
 }
