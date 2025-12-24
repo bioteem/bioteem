@@ -12,16 +12,24 @@ function requireEnv(name: string) {
   if (!v) throw new Error(`Missing env: ${name}`)
   return v
 }
-
 function getExpectedShipDate() {
   const d = new Date()
 
-  // Optional: if after 4pm, ship next day
+  // After 4pm → start from next day
   if (d.getHours() >= 16) {
     d.setDate(d.getDate() + 1)
   }
 
-  return d.toISOString().slice(0, 10) // YYYY-MM-DD
+  // Skip weekends
+  while (d.getDay() === 0 || d.getDay() === 6) {
+    d.setDate(d.getDate() + 1)
+  }
+
+  return {
+    year: d.getFullYear(),
+    month: d.getMonth() + 1,
+    day: d.getDate(),
+  }
 }
 
 
