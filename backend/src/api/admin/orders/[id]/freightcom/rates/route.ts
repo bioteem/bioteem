@@ -13,6 +13,18 @@ function requireEnv(name: string) {
   return v
 }
 
+function getExpectedShipDate() {
+  const d = new Date()
+
+  // Optional: if after 4pm, ship next day
+  if (d.getHours() >= 16) {
+    d.setDate(d.getDate() + 1)
+  }
+
+  return d.toISOString().slice(0, 10) // YYYY-MM-DD
+}
+
+
 async function freightcomRequest(
   path: string,
   opts?: { method?: string; body?: any }
@@ -164,7 +176,7 @@ if (!order) {
     receives_email_updates: true,
   }
 
-  const payload = { details: { origin, destination, parcels } }
+  const payload = { details: { expected_ship_date: getExpectedShipDate(), origin, destination, parcels } }
 
   const created = await freightcomRequest("/rate", { method: "POST", body: payload })
   const rate_id = created?.rate_id
