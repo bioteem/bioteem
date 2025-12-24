@@ -58,43 +58,77 @@ async function freightcomRequest(
   return text ? JSON.parse(text) : {}
 }
 
-function buildParcelsFromOrder(order: any) {
+function round2(n: number) {
+  return Math.round(n * 100) / 100
+}
+
+// g -> lb
+function gToLb(g: number) {
+  return g / 453.59237
+}
+
+// cm -> in
+function cmToIn(cm: number) {
+  return cm / 2.54
+}
+
+/**
+ * Builds Freightcom "packages" from Medusa order items.
+ * Strategy: one package per unit (simple & always valid).
+ * Later we can merge into fewer packages.
+ */
+function buildFreightcomPackages(order: any) {
   const DEFAULT_WEIGHT_G = Number(process.env.DEFAULT_ITEM_WEIGHT_G || 500)
   const DEFAULT_L_CM = Number(process.env.DEFAULT_ITEM_LENGTH_CM || 20)
   const DEFAULT_W_CM = Number(process.env.DEFAULT_ITEM_WIDTH_CM || 15)
   const DEFAULT_H_CM = Number(process.env.DEFAULT_ITEM_HEIGHT_CM || 10)
 
-  const parcels: any[] = []
+  const packages: any[] = []
 
   for (const item of order.items || []) {
     const qty = Math.max(1, Number(item.quantity || 1))
     const v = item.variant || {}
 
-    // Medusa variant shipping fields (from the Shipping widget)
     const weightG = Number.isFinite(Number(v.weight)) ? Number(v.weight) : DEFAULT_WEIGHT_G
-    const L = Number.isFinite(Number(v.length)) ? Number(v.length) : DEFAULT_L_CM
-    const W = Number.isFinite(Number(v.width)) ? Number(v.width) : DEFAULT_W_CM
-    const H = Number.isFinite(Number(v.height)) ? Number(v.height) : DEFAULT_H_CM
+    const Lcm = Number.isFinite(Number(v.length)) ? Number(v.length) : DEFAULT_L_CM
+    const Wcm = Number.isFinite(Number(v.width)) ? Number(v.width) : DEFAULT_W_CM
+    const Hcm = Number.isFinite(Number(v.height)) ? Number(v.height) : DEFAULT_H_CM
+
+    const weightLb = Math.max(0.01, round2(gToLb(weightG)))
+    const Lin = Math.max(0.1, round2(cmToIn(Lcm)))
+    const Win = Math.max(0.1, round2(cmToIn(Wcm)))
+    const Hin = Math.max(0.1, round2(cmToIn(Hcm)))
 
     for (let i = 0; i < qty; i++) {
-      parcels.push({
-        weight: { value: weightG / 1000, unit: "kg" }, // g -> kg
-        dimensions: { length: L, width: W, height: H, unit: "cm" },
-        description: item.title || "Item",
+      packages.push({
+        description: item.title || "Package",
+        measurements: {
+          weight: { unit: "lb", value: weightLb },
+          cuboid: { unit: "in", l: Lin, w: Win, h: Hin },
+        },
       })
     }
   }
 
-  if (parcels.length === 0) {
-    parcels.push({
-      weight: { value: DEFAULT_WEIGHT_G / 1000, unit: "kg" },
-      dimensions: { length: DEFAULT_L_CM, width: DEFAULT_W_CM, height: DEFAULT_H_CM, unit: "cm" },
-      description: "Default parcel",
+  // Safety fallback
+  if (packages.length === 0) {
+    packages.push({
+      description: "Default package",
+      measurements: {
+        weight: { unit: "lb", value: round2(gToLb(DEFAULT_WEIGHT_G)) },
+        cuboid: {
+          unit: "in",
+          l: round2(cmToIn(DEFAULT_L_CM)),
+          w: round2(cmToIn(DEFAULT_W_CM)),
+          h: round2(cmToIn(DEFAULT_H_CM)),
+        },
+      },
     })
   }
 
-  return parcels
+  return packages
 }
+
 
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   const orderId = req.params.id
@@ -148,7 +182,6 @@ if (!order) {
     })
   }
 
-  const parcels = buildParcelsFromOrder(order)
 
   // NOTE: most carrier APIs want ISO country + region codes (CA, NS, etc.)
   // If Freightcom needs full names you can revert, but this is safer.
@@ -184,7 +217,7 @@ if (!order) {
     receives_email_updates: true,
   }
 
-  const payload = { details: { expected_ship_date: getExpectedShipDate(), origin, destination, parcels } }
+  const payload = { details: { expected_ship_date: getExpectedShipDate(), origin, destination, "packaging_type": "package",     packages: buildFreightcomPackages(order), } }
 
   const created = await freightcomRequest("/rate", { method: "POST", body: payload })
   const rate_id = created?.rate_id
