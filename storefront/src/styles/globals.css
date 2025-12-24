@@ -118,3 +118,22 @@
     @apply text-[32px] leading-[44px] font-semibold;
   }
 }
+
+/* Make mux-player behave like a true background */
+mux-player.mux-hero {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* Force the actual <video> to cover */
+mux-player.mux-hero video {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+  object-position: center !important;
+}
+mux-player.mux-hero {
+  --controls: none;
+}
