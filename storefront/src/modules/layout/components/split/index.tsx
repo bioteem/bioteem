@@ -57,7 +57,6 @@ export default function SplitSection({
     <p
       className={[
         "leading-relaxed text-ui-fg-subtle",
-        variant === "portrait" ? "text-base md:text-lg" : "text-sm md:text-base",
       ].join(" ")}
     >
       {body}
@@ -82,8 +81,7 @@ export default function SplitSection({
       <Heading
         level="h2"
         className={[
-          "font-normal text-ui-fg-base",
-          variant === "portrait" ? "text-3xl md:text-4xl" : "text-2xl md:text-3xl",
+          "text-ui-fg-base",
         ].join(" ")}
       >
         {title}

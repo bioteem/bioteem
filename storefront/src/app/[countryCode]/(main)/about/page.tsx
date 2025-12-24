@@ -5,8 +5,6 @@ export default function AboutPage() {
   return (
     <div className="w-full">
        <SplitSection
-      
-              eyebrow="A word from our Founder"
               title="A message from our Founder"
         body="Bioteem40 was inspired by my time in pediatric clinics in my home country of Uganda, where I saw firsthand how proper nutrition—and the ability to actually absorb it—can transform health outcomes. Bioteem was created to deliver complete, accessible nutrition through a probiotic-powered system designed for maximum absorption and truly effective supplementation.
  
