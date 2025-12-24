@@ -48,7 +48,7 @@ const Hero = () => {
         <div className="text-center">
           <Heading
             level="h1"
-            className="text-3xl md:text-4xl font-normal text-white"
+            className="text-3xl md:text-4xl text-white"
           >
             Designed to Nourish
           </Heading>
