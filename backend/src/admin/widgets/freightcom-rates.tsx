@@ -2,20 +2,18 @@ import { useMemo, useState } from "react"
 import { defineWidgetConfig } from "@medusajs/admin-sdk"
 import { Button, Container, Heading, RadioGroup, Text } from "@medusajs/ui"
 
-type Rate = {
-  // we’ll render defensively since Freightcom’s exact fields vary by service
-  id?: string
-  service_name?: string
-  carrier_name?: string
-  total_price?: number
-  currency?: string
-  eta?: string
-  [k: string]: any
-}
+type Rate = Record<string, any>
 
 export default function FreightcomRatesWidget(props: any) {
-  // Dashboard passes data depending on zone; for order details zones, you typically get `data.order`
-  const order = props?.data?.order
+  // ✅ Try multiple shapes (dashboard differs by zone/version)
+  const order =
+    props?.data?.order ??
+    props?.order ??
+    (props?.data?.id ? props.data : null) ??
+    props?.data?.resource ??
+    null
+
+  const orderId = order?.id
 
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -25,24 +23,23 @@ export default function FreightcomRatesWidget(props: any) {
 
   const prettyRates = useMemo(() => {
     return (rates || []).map((r, idx) => {
-      const key = String(r.id ?? `${idx}`)
+      const key = String(r.id ?? r.rate_id ?? r.service_id ?? idx)
       const label =
-        `${r.carrier_name ?? "Carrier"} • ${r.service_name ?? "Service"} • ` +
-        `${r.total_price ?? "?"} ${r.currency ?? ""} ${r.eta ? `• ${r.eta}` : ""}`
+        `${r.carrier_name ?? r.carrier ?? "Carrier"} • ` +
+        `${r.service_name ?? r.service ?? "Service"} • ` +
+        `${r.total_price ?? r.total ?? r.price ?? "?"} ${r.currency ?? ""}`
 
-      return { key, label, raw: r }
+      return { key, label }
     })
   }, [rates])
 
   const fetchRates = async () => {
-    if (!order?.id) return
+    if (!orderId) return
     setLoading(true)
     setError(null)
-    setRates([])
-    setSelected("")
 
     try {
-      const resp = await fetch(`/admin/orders/${order.id}/freightcom/rates`, {
+      const resp = await fetch(`/admin/orders/${orderId}/freightcom/rates`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -52,13 +49,12 @@ export default function FreightcomRatesWidget(props: any) {
 
       if (resp.status === 202) {
         setRateId(json.rate_id)
-        setError("Rates are still processing. Click “Get Rates” again in a moment.")
+        setError("Rates still processing — click Get Rates again in a moment.")
+        setRates([])
         return
       }
 
-      if (!resp.ok) {
-        throw new Error(json?.message || "Failed to fetch rates")
-      }
+      if (!resp.ok) throw new Error(json?.message || "Failed to fetch rates")
 
       setRateId(json.rate_id)
       setRates(Array.isArray(json.rates) ? json.rates : [])
@@ -78,9 +74,14 @@ export default function FreightcomRatesWidget(props: any) {
             <Text size="small" className="text-ui-fg-subtle">
               Get live rates for this order and pick one to book (next step).
             </Text>
+
+            {/* ✅ Debug line so we can see if the widget has the order */}
+            <Text size="small" className="mt-2 text-ui-fg-subtle">
+              Debug: orderId = {orderId || "(missing)"}{" "}
+            </Text>
           </div>
 
-          <Button onClick={fetchRates} isLoading={loading} disabled={!order?.id}>
+          <Button onClick={fetchRates} isLoading={loading} disabled={!orderId}>
             Get Rates
           </Button>
         </div>
@@ -107,15 +108,15 @@ export default function FreightcomRatesWidget(props: any) {
           <RadioGroup value={selected} onValueChange={setSelected}>
             <div className="flex flex-col gap-2">
               {prettyRates.map((r) => (
-                <RadioGroup.Item key={r.key} value={r.key}>
-                  {r.label}
-                </RadioGroup.Item>
+                <div key={r.key} className="flex items-center gap-2">
+                  <RadioGroup.Item value={r.key} />
+                  <label className="text-sm cursor-pointer">{r.label}</label>
+                </div>
               ))}
             </div>
           </RadioGroup>
         )}
 
-        {/* Next step (booking) will be enabled once we build the book route */}
         <div className="mt-4">
           <Button disabled={!selected} variant="secondary">
             Book Shipment (next)
@@ -127,6 +128,5 @@ export default function FreightcomRatesWidget(props: any) {
 }
 
 export const config = defineWidgetConfig({
-  // Good default zone for order page (you can switch to side/before/after later)
   zone: "order.details.after",
 })
