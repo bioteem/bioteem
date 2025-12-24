@@ -26,47 +26,47 @@ const ProductTripleInfo: React.FC<ProductTripleInfoProps> = ({ product }) => {
   if (!template) return null
 
   return (
-    <section className="my-24"> {/* 👈 generous vertical margins */}
-      <Container className="px-0">
+    /* 👇 SIDE MARGINS LIVE HERE */
+    <section className="my-24 px-4 sm:px-6 lg:px-10">
+      <Container>
         {/* Section label */}
-        <p className="mb-8 text-xs uppercase tracking-[0.22em] text-ui-fg-muted">
+        <p className="mb-6 text-xs uppercase tracking-[0.22em] text-ui-fg-muted">
           At a glance
         </p>
 
-        <div className="grid grid-cols-1 gap-8 lg:grid-cols-3">
+        {/* Cards */}
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
           {template.columns.map((col, idx) => (
             <div
               key={idx}
               className={clx(
-                "relative rounded-3xl bg-ui-bg-subtle",
+                "rounded-2xl bg-ui-bg-subtle",
                 "border border-ui-border-base",
-                "p-8 md:p-10",
+                "p-5 md:p-6", // 👈 reduced internal padding
                 "shadow-sm hover:shadow-md transition-shadow"
               )}
             >
-              {/* Column title */}
-              <h3 className="text-xl md:text-2xl font-semibold text-ui-fg-base">
+              {/* Title */}
+              <h3 className="text-lg md:text-xl font-semibold text-ui-fg-base">
                 {col.title}
               </h3>
 
               {/* List */}
-              <ul className="mt-6 space-y-4">
+              <ul className="mt-4 space-y-3">
                 {col.items.map((item, i) => (
-                  <li key={i} className="flex items-start gap-4">
-                    {/* Bullet */}
+                  <li key={i} className="flex items-start gap-3">
                     <span
                       aria-hidden
                       className={clx(
-                        "mt-[0.6rem] h-2 w-2 shrink-0 rounded-full",
+                        "mt-[0.5rem] h-1.5 w-1.5 shrink-0 rounded-full",
                         item.highlight
                           ? "bg-[#E24B7A]"
                           : "bg-ui-fg-muted"
                       )}
                     />
-                    {/* Text */}
                     <p
                       className={clx(
-                        "text-sm md:text-base leading-relaxed",
+                        "text-sm leading-relaxed",
                         item.highlight
                           ? "text-[#E24B7A] font-medium"
                           : "text-ui-fg-subtle"
@@ -78,16 +78,16 @@ const ProductTripleInfo: React.FC<ProductTripleInfoProps> = ({ product }) => {
                 ))}
               </ul>
 
-              {/* Footer (badge) */}
+              {/* Footer badge */}
               {col.footerKey === "cdhf" && (
-                <div className="mt-10 pt-6 border-t border-ui-border-base">
-                  <div className="flex items-center gap-4">
+                <div className="mt-6 pt-4 border-t border-ui-border-base">
+                  <div className="flex items-center gap-3">
                     <Image
-                      src="/assets/cdhf.png" // ensure correct path
+                      src="/assets/cdhf.png"
                       alt="CDHF Certified"
                       width={220}
                       height={90}
-                      className="h-11 md:h-12 w-auto"
+                      className="h-10 w-auto"
                     />
                     <span className="text-xs text-ui-fg-muted">
                       Digestive health certified
