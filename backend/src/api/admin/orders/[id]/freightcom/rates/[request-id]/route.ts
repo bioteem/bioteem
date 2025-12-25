@@ -2,26 +2,27 @@ import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 
 export const AUTHENTICATE = true
 
-/* --------------------------------------------------
-  Helpers
--------------------------------------------------- */
+/* ---------------------------------
+  Safe helpers (NO throws at import)
+---------------------------------- */
 
-function getEnv(name: string) {
-  const v = process.env[name]
-  if (!v) {
-    console.error(`❌ Missing env: ${name}`)
-    throw new Error(`Missing env: ${name}`)
-  }
-  return v
+function safeEnv(name: string) {
+  return process.env[name] || null
 }
 
-async function freightcomGet(path: string) {
-  const base = getEnv("FREIGHTCOM_API_BASE_URL")
-  const key = getEnv("FREIGHTCOM_API_KEY")
+async function safeFreightcomGet(path: string) {
+  const base = safeEnv("FREIGHTCOM_API_BASE_URL")
+  const key = safeEnv("FREIGHTCOM_API_KEY")
 
-  const url = `${base}${path}`
+  if (!base || !key) {
+    throw new Error("Freightcom env vars missing")
+  }
 
-  const res = await fetch(url, {
+  if (typeof fetch !== "function") {
+    throw new Error("fetch not available in runtime")
+  }
+
+  const res = await fetch(`${base}${path}`, {
     method: "GET",
     headers: {
       "Content-Type": "application/json",
@@ -39,40 +40,31 @@ async function freightcomGet(path: string) {
   }
 
   if (!res.ok) {
-    console.error("❌ Freightcom GET failed", {
-      url,
-      status: res.status,
-      body: json ?? text,
-    })
     throw new Error(`Freightcom ${res.status}`)
   }
 
   return json ?? {}
 }
 
-/* --------------------------------------------------
-  Sorting / prioritization
--------------------------------------------------- */
+/* ---------------------------------
+  Sorting helpers
+---------------------------------- */
 
-const PRIORITY_CARRIERS = ["fedex", "ups", "purolator"]
+const PRIORITY = ["fedex", "ups", "purolator"]
 
-function carrierPriority(name?: string) {
+function carrierRank(name?: string) {
   if (!name) return 99
   const n = name.toLowerCase()
-  const idx = PRIORITY_CARRIERS.findIndex((c) => n.includes(c))
+  const idx = PRIORITY.findIndex((p) => n.includes(p))
   return idx === -1 ? 99 : idx
 }
 
 function sortRates(rates: any[], sort: string) {
-  const list = [...rates]
-
-  list.sort((a, b) => {
-    // 1) Carrier priority first
-    const pa = carrierPriority(a.carrier_name)
-    const pb = carrierPriority(b.carrier_name)
+  return [...rates].sort((a, b) => {
+    const pa = carrierRank(a.carrier_name)
+    const pb = carrierRank(b.carrier_name)
     if (pa !== pb) return pa - pb
 
-    // 2) Sort mode
     if (sort === "price") {
       return Number(a.total?.value || 0) - Number(b.total?.value || 0)
     }
@@ -81,20 +73,17 @@ function sortRates(rates: any[], sort: string) {
       return Number(a.transit_time_days ?? 999) - Number(b.transit_time_days ?? 999)
     }
 
-    // 3) Default "best"
     const priceDiff =
       Number(a.total?.value || 0) - Number(b.total?.value || 0)
     if (priceDiff !== 0) return priceDiff
 
     return Number(a.transit_time_days ?? 999) - Number(b.transit_time_days ?? 999)
   })
-
-  return list
 }
 
-/* --------------------------------------------------
-  Route
--------------------------------------------------- */
+/* ---------------------------------
+  GET route (SAFE)
+---------------------------------- */
 
 export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
   try {
@@ -104,21 +93,17 @@ export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
     const pageSize = Math.min(50, Math.max(1, Number(req.query.page_size || 20)))
     const sort = String(req.query.sort || "best")
 
-    // Fetch from Freightcom
-    const result = await freightcomGet(`/rate/${rateId}`)
+    const result = await safeFreightcomGet(`/rate/${rateId}`)
 
     const status = result.status ?? {}
-    const allRates: any[] = Array.isArray(result.rates) ? result.rates : []
+    const allRates = Array.isArray(result.rates) ? result.rates : []
 
-    // Sort + prioritize
     const sorted = sortRates(allRates, sort)
 
-    // Pagination
-    const totalRates = sorted.length
-    const totalPages = Math.max(1, Math.ceil(totalRates / pageSize))
+    const total = sorted.length
+    const totalPages = Math.max(1, Math.ceil(total / pageSize))
     const start = (page - 1) * pageSize
     const end = start + pageSize
-    const pagedRates = sorted.slice(start, end)
 
     return res.json({
       request_id: rateId,
@@ -127,12 +112,12 @@ export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
       pagination: {
         page,
         page_size: pageSize,
-        total_rates: totalRates,
+        total_rates: total,
         total_pages: totalPages,
         has_next: page < totalPages,
         has_prev: page > 1,
       },
-      rates: pagedRates,
+      rates: sorted.slice(start, end),
     })
   } catch (e: any) {
     return res.status(500).json({
