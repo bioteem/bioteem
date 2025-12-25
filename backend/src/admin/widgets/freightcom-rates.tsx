@@ -1,18 +1,37 @@
 import { useEffect, useMemo, useState } from "react"
 import { defineWidgetConfig } from "@medusajs/admin-sdk"
-import { Container, Heading, Button, Text, Badge, Select } from "@medusajs/ui"
+import { Container, Heading, Button, Text, Badge } from "@medusajs/ui"
 import { useMutation, useQuery } from "@tanstack/react-query"
 import { sdk } from "../lib/sdk"
 
-function getOrderFromWidgetData(data: any) {
-  return data?.order ?? data?.resource ?? (data?.id ? data : null)
+type JsonDate = { year: number; month: number; day: number }
+
+type Money = { value: string; currency: string }
+
+type Surcharge = { type: string; amount: Money }
+type Tax = { type: string; amount: Money }
+
+type FreightcomRate = {
+  service_id: string
+  valid_until?: JsonDate
+  total?: Money
+  base?: Money
+  surcharges?: Surcharge[]
+  taxes?: Tax[]
+  transit_time_days?: number
+  transit_time_not_available?: boolean
+  carrier_name?: string
+  service_name?: string
+  paperless?: boolean
+  // keep extra fields safely
+  [k: string]: any
 }
 
 type RatesGetResponse = {
   request_id: string
-  status: { done: boolean; total: number; complete: number }
-  sort: string
-  pagination: {
+  status?: { done: boolean; total: number; complete: number }
+  sort?: string
+  pagination?: {
     page: number
     page_size: number
     total_rates: number
@@ -20,7 +39,32 @@ type RatesGetResponse = {
     has_next: boolean
     has_prev: boolean
   }
-  rates: any[]
+  rates?: FreightcomRate[]
+}
+
+function getOrderFromWidgetData(data: any) {
+  // Medusa admin detail widgets sometimes pass different shapes
+  return data?.order ?? data?.resource ?? data ?? null
+}
+
+function formatJsonDate(d?: JsonDate) {
+  if (!d) return "—"
+  const mm = String(d.month).padStart(2, "0")
+  const dd = String(d.day).padStart(2, "0")
+  return `${d.year}-${mm}-${dd}`
+}
+
+function moneyLabel(m?: Money) {
+  if (!m?.value) return "—"
+  // Freightcom often returns cents-as-string; keep as-is (no assumptions)
+  return `${m.value} ${m.currency || ""}`.trim()
+}
+
+function sumMoney(items: { amount: Money }[] | undefined) {
+  if (!items || items.length === 0) return null
+  const currency = items[0]?.amount?.currency
+  const total = items.reduce((acc, it) => acc + (Number(it.amount?.value || 0) || 0), 0)
+  return { value: String(total), currency: currency || "" }
 }
 
 export default function FreightcomRatesWidget({ data }: any) {
@@ -30,25 +74,26 @@ export default function FreightcomRatesWidget({ data }: any) {
   const [requestId, setRequestId] = useState<string | null>(null)
   const [sort, setSort] = useState<"best" | "price" | "days">("best")
   const [page, setPage] = useState(1)
-  const pageSize = 20
+  const pageSize = 12
 
-  // POST: create rate request, returns request_id
-  const createRates = useMutation({
+  const [selectedServiceId, setSelectedServiceId] = useState<string | null>(null)
+
+  // 1) POST create request
+  const createRequest = useMutation({
     mutationFn: async () => {
       if (!orderId) throw new Error("Missing orderId")
-      return sdk.client.fetch(`/admin/orders/${orderId}/freightcom/rates`, {
-        method: "POST",
-      })
+      return sdk.client.fetch(`/admin/orders/${orderId}/freightcom/rates`, { method: "POST" })
     },
     onSuccess: (res: any) => {
       const id = res?.request_id
-      if (!id) throw new Error("No request_id returned from backend")
+      if (!id) throw new Error("Backend did not return request_id")
       setRequestId(id)
       setPage(1)
+      setSelectedServiceId(null)
     },
   })
 
-  // GET: fetch/poll rates by request_id
+  // 2) GET fetch paginated rates
   const ratesQuery = useQuery({
     queryKey: ["freightcom-rates", orderId, requestId, sort, page, pageSize],
     enabled: Boolean(orderId && requestId),
@@ -62,29 +107,33 @@ export default function FreightcomRatesWidget({ data }: any) {
         `/admin/orders/${orderId}/freightcom/rates/${requestId}?${qs.toString()}`
       )
     },
-    // Poll until done
+    // Poll until done, but don’t spam forever
     refetchInterval: (q) => {
       const done = (q.state.data as any)?.status?.done
-      return done ? false : 900
+      const failures = q.state.fetchFailureCount ?? 0
+      if (done) return false
+      if (failures >= 8) return false
+      return 1200
     },
   })
 
-  const statusBadge = useMemo(() => {
-    if (createRates.isPending) return <Badge size="small" color="orange">Creating…</Badge>
-    if (!requestId) return <Badge size="small" color="grey">Not started</Badge>
-    if (ratesQuery.isFetching && !ratesQuery.data?.status?.done)
-      return <Badge size="small" color="orange">Fetching…</Badge>
-    if (ratesQuery.data?.status?.done) return <Badge size="small" color="green">Done</Badge>
-    return <Badge size="small" color="orange">Processing</Badge>
-  }, [createRates.isPending, requestId, ratesQuery.isFetching, ratesQuery.data])
-
-  const rates = ratesQuery.data?.rates ?? []
+  const status = ratesQuery.data?.status
   const pagination = ratesQuery.data?.pagination
+  const rates = ratesQuery.data?.rates || []
 
-  // reset page if sort changes
+  const isWorking =
+    createRequest.isPending || (ratesQuery.isFetching && !status?.done)
+
+  // Reset to page 1 when sort changes
   useEffect(() => {
     setPage(1)
   }, [sort])
+
+  const headerBadge = useMemo(() => {
+    if (!requestId) return <Badge size="small" color="grey">Not started</Badge>
+    if (status?.done) return <Badge size="small" color="green">Done</Badge>
+    return <Badge size="small" color="orange">Processing</Badge>
+  }, [requestId, status?.done])
 
   return (
     <Container className="divide-y p-0">
@@ -92,111 +141,197 @@ export default function FreightcomRatesWidget({ data }: any) {
         <div className="min-w-0">
           <Heading level="h2">Freightcom Rates</Heading>
           <Text size="small" className="text-ui-fg-subtle">
-            Create a rate request, then fetch all available services (FedEx / UPS / Purolator prioritized).
+            Get shipping options for this order (rates, surcharges, taxes, transit time).
           </Text>
 
           <div className="mt-2 flex items-center gap-2 flex-wrap">
-            {statusBadge}
+            {headerBadge}
             {requestId ? (
               <Text size="small" className="text-ui-fg-subtle break-all">
-                Request ID: {requestId}
+                Request: {requestId}
               </Text>
             ) : null}
-            {ratesQuery.data?.status ? (
+            {status ? (
               <Text size="small" className="text-ui-fg-subtle">
-                {ratesQuery.data.status.complete}/{ratesQuery.data.status.total} complete
+                {status.complete}/{status.total} complete
               </Text>
             ) : null}
           </div>
         </div>
 
         <div className="flex items-center gap-2">
-          <Select
+          {/* lightweight sort control using native select to avoid extra deps */}
+          <select
+            className="border border-ui-border-base rounded px-2 py-1 text-sm bg-ui-bg-field"
             value={sort}
-            onValueChange={(v) => setSort(v as any)}
-            size="small"
+            onChange={(e) => setSort(e.target.value as any)}
+            disabled={!requestId && !orderId}
           >
-            <Select.Item value="best">Best (priority + cheapest)</Select.Item>
-            <Select.Item value="price">Cheapest</Select.Item>
-            <Select.Item value="days">Fastest</Select.Item>
-          </Select>
+            <option value="best">Best</option>
+            <option value="price">Cheapest</option>
+            <option value="days">Fastest</option>
+          </select>
 
           <Button
-            onClick={() => createRates.mutate()}
-            disabled={!orderId || createRates.isPending}
+            onClick={() => createRequest.mutate()}
+            disabled={!orderId || createRequest.isPending}
           >
-            {createRates.isPending ? "Starting…" : "Get Rates"}
+            {createRequest.isPending ? "Starting…" : "Get Rates"}
           </Button>
         </div>
       </div>
 
-      <div className="px-6 py-4">
-        {(createRates.isError || ratesQuery.isError) && (
+      <div className="px-6 py-4 space-y-3">
+        {(createRequest.isError || ratesQuery.isError) && (
           <Text size="small" className="text-ui-fg-error">
-            {String((createRates.error as any)?.message || (ratesQuery.error as any)?.message || "Error")}
+            {String(
+              (createRequest.error as any)?.message ||
+                (ratesQuery.error as any)?.message ||
+                "Error"
+            )}
           </Text>
         )}
 
         {!requestId && (
           <Text size="small" className="text-ui-fg-subtle">
-            Click <span className="font-medium">Get Rates</span> to create a Freightcom rate request.
+            Click <span className="font-medium">Get Rates</span> to request quotes from Freightcom.
           </Text>
         )}
 
         {requestId && rates.length === 0 && (
           <Text size="small" className="text-ui-fg-subtle">
-            Waiting for rates… (this will auto-refresh)
+            Waiting for rates… (auto-refreshing)
           </Text>
         )}
 
         {rates.length > 0 && (
           <div className="space-y-2">
-            {rates.map((r, idx) => {
-              const total = r?.total?.value
-              const currency = r?.total?.currency
-              const days = r?.transit_time_not_available ? "N/A" : r?.transit_time_days
-              const carrier = r?.carrier_name ?? "Carrier"
-              const service = r?.service_name ?? r?.service_id ?? "Service"
+            {rates.map((r) => {
+              const surchargeTotal = sumMoney((r.surcharges || []).map((s) => ({ amount: s.amount })))
+              const taxTotal = sumMoney((r.taxes || []).map((t) => ({ amount: t.amount })))
+
+              const isSelected = selectedServiceId === r.service_id
 
               return (
                 <div
-                  key={`${r.service_id ?? idx}`}
-                  className="rounded-md border px-3 py-2"
+                  key={r.service_id}
+                  className={[
+                    "rounded-md border p-3 transition",
+                    isSelected ? "border-ui-fg-base" : "border-ui-border-base",
+                  ].join(" ")}
                 >
-                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <Text className="font-medium">
-                      {carrier} • {service}
-                    </Text>
-                    <Text className="text-sm">
-                      {total} {currency}{" "}
-                      <span className="text-ui-fg-subtle">
-                        • {days} days
-                      </span>
-                    </Text>
+                  <div className="flex items-start justify-between gap-3 flex-wrap">
+                    <div className="min-w-0">
+                      <Text className="font-medium">
+                        {(r.carrier_name || "Carrier")} • {(r.service_name || r.service_id)}
+                      </Text>
+                      <Text size="small" className="text-ui-fg-subtle break-all">
+                        service_id: {r.service_id}
+                      </Text>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {r.paperless ? (
+                        <Badge size="small" color="green">Paperless</Badge>
+                      ) : (
+                        <Badge size="small" color="grey">Non-paperless</Badge>
+                      )}
+                      <Button
+                        size="small"
+                        variant={isSelected ? "primary" : "secondary"}
+                        onClick={() => setSelectedServiceId(r.service_id)}
+                      >
+                        {isSelected ? "Selected" : "Select"}
+                      </Button>
+                    </div>
                   </div>
 
-                  <Text className="text-xs text-ui-fg-subtle break-all">
-                    <span className="font-medium">service_id:</span> {r.service_id}
-                  </Text>
+                  <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-2">
+                    <div className="rounded border border-ui-border-base p-2">
+                      <Text size="small" className="text-ui-fg-subtle">Total</Text>
+                      <Text className="font-medium">{moneyLabel(r.total)}</Text>
+                      <Text size="xsmall" className="text-ui-fg-subtle">
+                        Base: {moneyLabel(r.base)}
+                      </Text>
+                    </div>
 
-                  {(r.surcharges?.length || 0) > 0 && (
-                    <Text className="text-xs text-ui-fg-subtle">
-                      Surcharges: {r.surcharges.length}
-                    </Text>
-                  )}
+                    <div className="rounded border border-ui-border-base p-2">
+                      <Text size="small" className="text-ui-fg-subtle">Time</Text>
+                      <Text className="font-medium">
+                        {r.transit_time_not_available ? "N/A" : `${r.transit_time_days} days`}
+                      </Text>
+                      <Text size="xsmall" className="text-ui-fg-subtle">
+                        Valid until: {formatJsonDate(r.valid_until)}
+                      </Text>
+                    </div>
+
+                    <div className="rounded border border-ui-border-base p-2">
+                      <Text size="small" className="text-ui-fg-subtle">Extras</Text>
+                      <Text size="small">
+                        Surcharges: {moneyLabel(surchargeTotal || undefined)}
+                      </Text>
+                      <Text size="small">
+                        Taxes: {moneyLabel(taxTotal || undefined)}
+                      </Text>
+                    </div>
+                  </div>
+
+                  {/* details list */}
+                  <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2">
+                    <div className="rounded border border-ui-border-base p-2">
+                      <Text size="xsmall" className="text-ui-fg-subtle">Surcharges</Text>
+                      {(r.surcharges || []).length === 0 ? (
+                        <Text size="small" className="text-ui-fg-subtle">None</Text>
+                      ) : (
+                        <div className="mt-1 space-y-1">
+                          {r.surcharges!.slice(0, 6).map((s, idx) => (
+                            <Text key={`${s.type}-${idx}`} size="small">
+                              {s.type}: {moneyLabel(s.amount)}
+                            </Text>
+                          ))}
+                          {r.surcharges!.length > 6 && (
+                            <Text size="small" className="text-ui-fg-subtle">
+                              +{r.surcharges!.length - 6} more…
+                            </Text>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="rounded border border-ui-border-base p-2">
+                      <Text size="xsmall" className="text-ui-fg-subtle">Taxes</Text>
+                      {(r.taxes || []).length === 0 ? (
+                        <Text size="small" className="text-ui-fg-subtle">None</Text>
+                      ) : (
+                        <div className="mt-1 space-y-1">
+                          {r.taxes!.slice(0, 6).map((t, idx) => (
+                            <Text key={`${t.type}-${idx}`} size="small">
+                              {t.type}: {moneyLabel(t.amount)}
+                            </Text>
+                          ))}
+                          {r.taxes!.length > 6 && (
+                            <Text size="small" className="text-ui-fg-subtle">
+                              +{r.taxes!.length - 6} more…
+                            </Text>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
               )
             })}
           </div>
         )}
 
+        {/* Pagination */}
         {pagination && pagination.total_pages > 1 && (
-          <div className="mt-4 flex items-center justify-between">
+          <div className="flex items-center justify-between pt-2">
             <Button
               size="small"
               variant="secondary"
               onClick={() => setPage((p) => Math.max(1, p - 1))}
-              disabled={!pagination.has_prev || ratesQuery.isFetching}
+              disabled={!pagination.has_prev || isWorking}
             >
               Prev
             </Button>
@@ -209,7 +344,7 @@ export default function FreightcomRatesWidget({ data }: any) {
               size="small"
               variant="secondary"
               onClick={() => setPage((p) => p + 1)}
-              disabled={!pagination.has_next || ratesQuery.isFetching}
+              disabled={!pagination.has_next || isWorking}
             >
               Next
             </Button>
