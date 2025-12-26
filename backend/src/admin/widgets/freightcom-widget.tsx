@@ -89,6 +89,13 @@ type PickupStatusResp = {
   pickup_confirmation_number?: string
 }
 
+type PickupGetResp = {
+  exists: boolean
+  status?: string
+  error?: string
+  pickup_confirmation_number?: string
+}
+
 function getOrderFromWidgetData(data: any) {
   return data?.order ?? data?.resource ?? data ?? null
 }
@@ -149,6 +156,20 @@ export default function FreightcomRatesWidget({ data }: any) {
     queryFn: async () => sdk.client.fetch<any>(`/admin/orders/${orderId}`),
     staleTime: 2_500,
   })
+
+  const refreshOrder = async () => {
+  await qc.invalidateQueries({ queryKey: ["admin-order", orderId] })
+}
+
+const refreshShipment = async () => {
+  await qc.invalidateQueries({ queryKey: ["freightcom-shipment", orderId, shipmentIdFromMeta] })
+  await qc.invalidateQueries({ queryKey: ["freightcom-shipment-status", orderId, shipmentIdFromMeta] })
+}
+
+const refreshPickup = async () => {
+  await qc.invalidateQueries({ queryKey: ["freightcom-pickup", orderId, shipmentIdFromMeta] })
+  await refreshOrder()
+}
 
   const order = orderQuery.data?.order ?? fallbackOrder
 
@@ -236,11 +257,6 @@ const [pickupPhone, setPickupPhone] = useState("")
     }
   }, [ship, order?.email])
 
-  const headerBadge = useMemo(() => {
-    if (!requestId) return <Badge size="small" color="grey">Not started</Badge>
-    if (done) return <Badge size="small" color="green">Ready</Badge>
-    return <Badge size="small" color="orange">Processing</Badge>
-  }, [requestId, done])
 
   const selectedRate = useMemo(() => {
     if (!selectedServiceId) return null
@@ -255,9 +271,21 @@ const pickupQuery = useQuery({
   queryKey: ["freightcom-pickup", orderId, shipmentIdFromMeta],
   enabled: !!orderId && !!shipmentIdFromMeta && isPickupModalOpen,
   queryFn: async () => {
-    return sdk.client.fetch<PickupStatusResp>(
+    return sdk.client.fetch<PickupGetResp>(
       `/admin/orders/${orderId}/freightcom/shipments/${shipmentIdFromMeta}/schedule`
     )
+  },
+  staleTime: 10_000,
+})
+const shipmentStatusQuery = useQuery({
+  queryKey: ["freightcom-shipment-status", orderId, shipmentIdFromMeta],
+  enabled: !!orderId && !!shipmentIdFromMeta,
+  queryFn: async () => {
+    const resp = await sdk.client.fetch<any>(
+      `/admin/orders/${orderId}/freightcom/shipments/${shipmentIdFromMeta}`
+    )
+    const s = resp?.shipment ?? resp
+    return s?.state ?? "unknown"
   },
   staleTime: 10_000,
 })
@@ -297,6 +325,30 @@ const pickupQuery = useQuery({
     setStep(1)
     setOffsetMeta({})
   }
+const headerBadge = useMemo(() => {
+  // Shipment exists → show shipment state
+  if (shipmentIdFromMeta) {
+    if (shipmentStatusQuery.isPending) {
+      return <Badge size="small" color="orange">Shipment: loading…</Badge>
+    }
+    return (
+      <Badge size="small" color="green">
+        Shipment: {shipmentStatusQuery.data}
+      </Badge>
+    )
+  }
+
+  // Otherwise fall back to rates flow
+  if (!requestId) return <Badge size="small" color="grey">Not started</Badge>
+  if (done) return <Badge size="small" color="green">Ready</Badge>
+  return <Badge size="small" color="orange">Processing</Badge>
+}, [
+  shipmentIdFromMeta,
+  shipmentStatusQuery.isPending,
+  shipmentStatusQuery.data,
+  requestId,
+  done,
+])
 
   const ratesMutation = useMutation({
     mutationFn: async (vars: { offset: number; openModalOnReady?: boolean }) => {
@@ -891,14 +943,12 @@ const cancelPickup = useMutation({
 
                 <div className="flex items-center gap-2">
                   <Button
-                    variant="secondary"
-                    onClick={() =>
-                      qc.invalidateQueries({ queryKey: ["freightcom-shipment", orderId, shipmentIdFromMeta] })
-                    }
-                    disabled={shipmentQuery.isPending}
-                  >
-                    Refresh
-                  </Button>
+  variant="secondary"
+  onClick={refreshShipment}
+  disabled={shipmentQuery.isPending}
+>
+  Refresh
+</Button>
 
                   <Button
                     variant="danger"
@@ -954,13 +1004,13 @@ const cancelPickup = useMutation({
 
               <div className="flex items-center gap-2">
                 <Button
-                  size="small"
-                  variant="secondary"
-                  onClick={() => qc.invalidateQueries({ queryKey: ["freightcom-pickup", orderId, shipmentIdFromMeta] })}
-                  disabled={pickupQuery.isPending}
-                >
-                  {pickupQuery.isPending ? "Refreshing…" : "Refresh"}
-                </Button>
+  size="small"
+  variant="secondary"
+  onClick={refreshPickup}
+  disabled={pickupQuery.isPending}
+>
+  {pickupQuery.isPending ? "Refreshing…" : "Refresh"}
+</Button>
 
                 <Button
                   size="small"
@@ -973,29 +1023,33 @@ const cancelPickup = useMutation({
               </div>
             </div>
 
-            {pickupQuery.isPending ? (
-              <Text size="small" className="text-ui-fg-subtle mt-2">Loading…</Text>
-            ) : pickupQuery.isError ? (
-              <Text size="small" className="text-ui-fg-error mt-2">
-                {String((pickupQuery.error as any)?.message || "Error")}
-              </Text>
-            ) : (
-              <>
-                <Text className="font-medium mt-2">
-                  Status: {pickupStatusFromMeta || pickupQuery.data?.status || "—"}
-                </Text>
+{pickupQuery.isPending ? (
+  <Text size="small" className="text-ui-fg-subtle mt-2">Loading…</Text>
+) : pickupQuery.isError ? (
+  <Text size="small" className="text-ui-fg-error mt-2">
+    {String((pickupQuery.error as any)?.message || "Error")}
+  </Text>
+) : pickupQuery.data?.exists === false ? (
+  <Text size="small" className="text-ui-fg-subtle mt-2">
+    No pickup scheduled yet.
+  </Text>
+) : (
+  <>
+    <Text className="font-medium mt-2">
+      Status: {pickupStatusFromMeta || pickupQuery.data?.status || "—"}
+    </Text>
 
-                <Text size="small" className="text-ui-fg-subtle">
-                  Confirmation: {pickupConfirmationFromMeta || pickupQuery.data?.pickup_confirmation_number || "—"}
-                </Text>
+    <Text size="small" className="text-ui-fg-subtle">
+      Confirmation: {pickupConfirmationFromMeta || pickupQuery.data?.pickup_confirmation_number || "—"}
+    </Text>
 
-                {pickupQuery.data?.error ? (
-                  <Text size="small" className="text-ui-fg-error mt-2">
-                    {pickupQuery.data.error}
-                  </Text>
-                ) : null}
-              </>
-            )}
+    {pickupQuery.data?.error ? (
+      <Text size="small" className="text-ui-fg-error mt-2">
+        {pickupQuery.data.error}
+      </Text>
+    ) : null}
+  </>
+)}
           </div>
 
           {/* Schedule form */}

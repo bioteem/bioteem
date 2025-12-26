@@ -11,38 +11,42 @@ function requireEnv(name: string) {
   return v
 }
 
-async function freightcomRequest(path: string, opts?: { method?: string; body?: any }) {
+async function freightcomRequestSafe(
+  path: string,
+  opts?: { method?: string; body?: any }
+): Promise<{ ok: boolean; status: number; data: any; raw?: string }> {
   const base = requireEnv("FREIGHTCOM_API_BASE_URL")
   const key = requireEnv("FREIGHTCOM_API_KEY")
   const url = `${base}${path}`
 
-  const method = opts?.method || "GET"
-  const body = opts?.body ? JSON.stringify(opts.body, null, 2) : undefined
-
   const res = await fetch(url, {
-    method,
-    headers: { "Content-Type": "application/json", Authorization: key },
-    body,
+    method: opts?.method || "GET",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: key,
+    },
+    body: opts?.body ? JSON.stringify(opts.body, null, 2) : undefined,
   })
 
   const text = await res.text().catch(() => "")
   let json: any = null
+
   try {
     json = text ? JSON.parse(text) : null
   } catch {
     json = null
   }
 
-  if (!res.ok) {
-    throw new Error(`Freightcom ${res.status}: ${JSON.stringify(json ?? { raw: text })}`)
+  return {
+    ok: res.ok,
+    status: res.status,
+    data: json ?? (text ? { raw: text } : null),
+    raw: text,
   }
-
-  return json ?? { raw: text }
 }
 
-function stripPickupMeta(prev: Record<string, any>) {
+function stripPickupMeta(prev: Record<string, any> = {}) {
   const next = { ...prev }
-  // wipe pickup-only keys (don’t touch shipment keys)
   delete next.freightcom_pickup_status
   delete next.freightcom_pickup_error
   delete next.freightcom_pickup_confirmation_number
@@ -51,22 +55,30 @@ function stripPickupMeta(prev: Record<string, any>) {
   return next
 }
 
-async function getOrderAndAssertShipment(req: MedusaRequest, orderId: string, shipmentId: string) {
+async function getOrderAndAssertShipment(
+  req: MedusaRequest,
+  orderId: string,
+  shipmentId: string
+) {
   const query = req.scope.resolve<Query>("query")
-  const { data } = await query.graph({
+
+  const result = await query.graph({
     entity: "order",
     fields: ["id", "metadata"],
     filters: { id: orderId },
   })
 
-  const order = data?.[0]
-  if (!order) throw new Error("Order not found")
+  const order = (result as any)?.data?.[0]
+  if (!order) {
+    const e: any = new Error("Order not found")
+    e.status = 404
+    throw e
+  }
 
   const meta = (order.metadata || {}) as Record<string, any>
-  const stored = meta.freightcom_shipment_id as string | undefined
+  const storedShipmentId = meta.freightcom_shipment_id as string | undefined
 
-  // IMPORTANT: enforce shipment_id matches what’s on the order
-  if (stored && stored !== shipmentId) {
+  if (storedShipmentId && storedShipmentId !== shipmentId) {
     const e: any = new Error("Shipment id does not match order metadata")
     e.status = 409
     e.code = "SHIPMENT_ID_MISMATCH"
@@ -76,89 +88,136 @@ async function getOrderAndAssertShipment(req: MedusaRequest, orderId: string, sh
   return { order, meta }
 }
 
+/* =========================
+   GET – fetch pickup status
+   ========================= */
 export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
   try {
-    const orderId = req.params.id
-    const shipmentId = req.params.shipment_id
-    if (!orderId) return res.status(400).json({ message: "Missing order id" })
-    if (!shipmentId) return res.status(400).json({ message: "Missing shipment_id" })
+    const { id: orderId, shipment_id: shipmentId } = req.params
+
+    if (!orderId || !shipmentId) {
+      return res.status(400).json({ message: "Missing order id or shipment_id" })
+    }
 
     const { meta } = await getOrderAndAssertShipment(req, orderId, shipmentId)
 
-    const data = await freightcomRequest(`/shipment/${shipmentId}/schedule`, { method: "GET" })
+    const r = await freightcomRequestSafe(`/shipment/${shipmentId}/schedule`)
 
-    // Persist a simple snapshot so you can inspect in Admin UI
     const orderModule = req.scope.resolve<IOrderModuleService>(Modules.ORDER)
+
+    if (!r.ok && r.status === 404) {
+      await orderModule.updateOrders(orderId, {
+        metadata: {
+          ...stripPickupMeta(meta),
+          freightcom_pickup_last_sync_at: new Date().toISOString(),
+        },
+      })
+      return res.status(200).json({ exists: false })
+    }
+
+    if (!r.ok) {
+      throw new Error(`Freightcom ${r.status}: ${JSON.stringify(r.data)}`)
+    }
+
     await orderModule.updateOrders(orderId, {
       metadata: {
         ...meta,
-        freightcom_pickup_status: data?.status ?? null,
-        freightcom_pickup_error: data?.error ?? null,
-        freightcom_pickup_confirmation_number: data?.pickup_confirmation_number ?? null,
+        freightcom_pickup_status: r.data?.status ?? null,
+        freightcom_pickup_error: r.data?.error ?? null,
+        freightcom_pickup_confirmation_number:
+          r.data?.pickup_confirmation_number ?? null,
         freightcom_pickup_last_sync_at: new Date().toISOString(),
       },
     })
 
-    return res.status(200).json(data)
+    return res.status(200).json({ exists: true, ...r.data })
   } catch (e: any) {
-    const status = e?.status || 500
-    return res.status(status).json({ message: e?.message || "Unknown error", code: e?.code })
+    return res
+      .status(e?.status || 500)
+      .json({ message: e?.message || "Unknown error", code: e?.code })
   }
 }
 
+/* =========================
+   POST – schedule pickup
+   ========================= */
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   try {
-    const orderId = req.params.id
-    const shipmentId = req.params.shipment_id
-    if (!orderId) return res.status(400).json({ message: "Missing order id" })
-    if (!shipmentId) return res.status(400).json({ message: "Missing shipment_id" })
+    const { id: orderId, shipment_id: shipmentId } = req.params
+    if (!orderId || !shipmentId) {
+      return res.status(400).json({ message: "Missing order id or shipment_id" })
+    }
 
     const payload = req.body || {}
     const { meta } = await getOrderAndAssertShipment(req, orderId, shipmentId)
 
-    const data = await freightcomRequest(`/shipment/${shipmentId}/schedule`, {
+    const r = await freightcomRequestSafe(`/shipment/${shipmentId}/schedule`, {
       method: "POST",
       body: payload,
     })
 
-    // Save minimal inspectable keys + the request body used
+    if (!r.ok) {
+      throw new Error(`Freightcom ${r.status}: ${JSON.stringify(r.data)}`)
+    }
+
     const orderModule = req.scope.resolve<IOrderModuleService>(Modules.ORDER)
+
     await orderModule.updateOrders(orderId, {
       metadata: {
         ...meta,
-        freightcom_pickup_request: payload, // yes it’s an object; useful for debugging
-        freightcom_pickup_status: data?.status ?? "pending",
-        freightcom_pickup_error: data?.error ?? null,
-        freightcom_pickup_confirmation_number: data?.pickup_confirmation_number ?? null,
+        freightcom_pickup_request: payload,
+        freightcom_pickup_status: r.data?.status ?? "pending",
+        freightcom_pickup_error: r.data?.error ?? null,
+        freightcom_pickup_confirmation_number:
+          r.data?.pickup_confirmation_number ?? null,
         freightcom_pickup_last_sync_at: new Date().toISOString(),
       },
     })
 
-    return res.status(200).json(data)
+    return res.status(200).json(r.data)
   } catch (e: any) {
-    const status = e?.status || 500
-    return res.status(status).json({ message: e?.message || "Unknown error", code: e?.code })
+    return res
+      .status(e?.status || 500)
+      .json({ message: e?.message || "Unknown error", code: e?.code })
   }
 }
 
+/* =========================
+   DELETE – cancel pickup
+   ========================= */
 export const DELETE = async (req: MedusaRequest, res: MedusaResponse) => {
   try {
-    const orderId = req.params.id
-    const shipmentId = req.params.shipment_id
-    if (!orderId) return res.status(400).json({ message: "Missing order id" })
-    if (!shipmentId) return res.status(400).json({ message: "Missing shipment_id" })
+    const { id: orderId, shipment_id: shipmentId } = req.params
+    if (!orderId || !shipmentId) {
+      return res.status(400).json({ message: "Missing order id or shipment_id" })
+    }
 
     const { meta } = await getOrderAndAssertShipment(req, orderId, shipmentId)
 
-    const data = await freightcomRequest(`/shipment/${shipmentId}/schedule`, { method: "DELETE" })
+    const r = await freightcomRequestSafe(`/shipment/${shipmentId}/schedule`, {
+      method: "DELETE",
+    })
 
-    // Clear pickup metadata (shipment remains)
     const orderModule = req.scope.resolve<IOrderModuleService>(Modules.ORDER)
-    await orderModule.updateOrders(orderId, { metadata: stripPickupMeta(meta) })
 
-    return res.status(200).json(data)
+    await orderModule.updateOrders(orderId, {
+      metadata: {
+        ...stripPickupMeta(meta),
+        freightcom_pickup_last_sync_at: new Date().toISOString(),
+      },
+    })
+
+    if (!r.ok && r.status !== 404) {
+      throw new Error(`Freightcom ${r.status}: ${JSON.stringify(r.data)}`)
+    }
+
+    return res.status(200).json({
+      cleared: true,
+      freightcom: r.ok ? r.data : { status: 404 },
+    })
   } catch (e: any) {
-    const status = e?.status || 500
-    return res.status(status).json({ message: e?.message || "Unknown error", code: e?.code })
+    return res
+      .status(e?.status || 500)
+      .json({ message: e?.message || "Unknown error", code: e?.code })
   }
 }
