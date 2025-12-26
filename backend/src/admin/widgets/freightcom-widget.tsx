@@ -396,22 +396,33 @@ export default function FreightcomRatesWidget({ data }: any) {
     },
   })
 
-  const cancelShipment = useMutation({
-    mutationFn: async () => {
-      if (!orderId) throw new Error("Missing orderId")
-      if (!shipmentIdFromMeta) throw new Error("Missing shipmentId")
-      return sdk.client.fetch<any>(
-        `/admin/orders/${orderId}/freightcom/shipments/${shipmentIdFromMeta}/cancel`,
-        { method: "POST" }
-      )
-    },
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ["admin-order", orderId] })
-      await qc.invalidateQueries({ queryKey: ["freightcom-shipment", orderId, shipmentIdFromMeta] })
-      setIsShipmentModalOpen(false)
-      resetRateFlow()
-    },
-  })
+const cancelShipment = useMutation({
+  mutationFn: async () => {
+    if (!orderId) throw new Error("Missing orderId")
+    if (!shipmentIdFromMeta) throw new Error("Missing shipmentId")
+
+    return sdk.client.fetch<any>(
+      `/admin/orders/${orderId}/freightcom/shipments/${shipmentIdFromMeta}/cancel`,
+      { method: "POST" }
+    )
+  },
+  onSuccess: async () => {
+    // 1) close modals + wipe widget UI state
+    setIsShipmentModalOpen(false)
+    setShowRawShipment(false)
+
+    // if you have these in your widget:
+    resetRateFlow()
+    setIsRatesModalOpen(false)
+    setStep(1)
+
+    // 2) pull fresh order metadata immediately (so View Shipment disables)
+    await qc.invalidateQueries({ queryKey: ["admin-order", orderId] })
+
+    // 3) also clear shipment details cache
+    await qc.invalidateQueries({ queryKey: ["freightcom-shipment", orderId] })
+  },
+})
 
   const goToStep2 = async () => {
     if (!selectedRate?.service_id) return

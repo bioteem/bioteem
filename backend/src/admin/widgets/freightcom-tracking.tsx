@@ -17,6 +17,8 @@ function getOrderFromWidgetData(data: any) {
   return data?.order ?? data?.resource ?? data ?? null
 }
 
+
+
 export default function FreightcomTrackingUpdatesWidget({ data }: any) {
   const fallbackOrder = getOrderFromWidgetData(data)
   const orderId = fallbackOrder?.id
