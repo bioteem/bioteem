@@ -187,9 +187,9 @@ const pickupLastScheduledAt =
   const [pageIndex, setPageIndex] = useState(0)
   const [offsetMeta, setOffsetMeta] = useState<Record<number, { next_offset?: number; rates_total?: number }>>({})
 
-  const [isPickupModalOpen, setIsPickupModalOpen] = useState(false)
+const [isPickupModalOpen, setIsPickupModalOpen] = useState(false)
 
-// simple defaults; tweak however you want
+// simple defaults
 const [pickupDateISO, setPickupDateISO] = useState(() => defaultShipDateISO())
 const [readyAt, setReadyAt] = useState<PickupTime>({ hour: 10, minute: 0 })
 const [readyUntil, setReadyUntil] = useState<PickupTime>({ hour: 16, minute: 0 })
@@ -251,14 +251,13 @@ const [pickupPhone, setPickupPhone] = useState("")
     return null
   }, [pages, selectedServiceId])
 
-  const pickupQuery = useQuery({
-  queryKey: ["freightcom-pickup", orderId, shipmentIdFromMeta, pickupConfirmationFromMeta, isPickupModalOpen],
+const pickupQuery = useQuery({
+  queryKey: ["freightcom-pickup", orderId, shipmentIdFromMeta],
   enabled: !!orderId && !!shipmentIdFromMeta && isPickupModalOpen,
   queryFn: async () => {
-    const resp = await sdk.client.fetch<PickupStatusResp>(
-      `/admin/orders/${orderId}/freightcom/shipments/${shipmentIdFromMeta}/pickup`
+    return sdk.client.fetch<PickupStatusResp>(
+      `/admin/orders/${orderId}/freightcom/shipments/${shipmentIdFromMeta}/schedule`
     )
-    return resp
   },
   staleTime: 10_000,
 })
@@ -387,14 +386,14 @@ const schedulePickup = useMutation({
     }
 
     return sdk.client.fetch<any>(
-      `/admin/orders/${orderId}/freightcom/shipments/${shipmentIdFromMeta}/pickup`,
+      `/admin/orders/${orderId}/freightcom/shipments/${shipmentIdFromMeta}/schedule`,
       { method: "POST", body }
     )
   },
   onSuccess: async () => {
-    // pickup info is saved in metadata by backend -> pull fresh order immediately
+    // backend writes snapshot into metadata
     await qc.invalidateQueries({ queryKey: ["admin-order", orderId] })
-    await qc.invalidateQueries({ queryKey: ["freightcom-pickup", orderId] })
+    await qc.invalidateQueries({ queryKey: ["freightcom-pickup", orderId, shipmentIdFromMeta] })
   },
 })
 
@@ -404,14 +403,14 @@ const cancelPickup = useMutation({
     if (!shipmentIdFromMeta) throw new Error("No shipment on this order.")
 
     return sdk.client.fetch<any>(
-      `/admin/orders/${orderId}/freightcom/shipments/${shipmentIdFromMeta}/pickup/cancel`,
-      { method: "POST" }
+      `/admin/orders/${orderId}/freightcom/shipments/${shipmentIdFromMeta}/schedule`,
+      { method: "DELETE" }
     )
   },
   onSuccess: async () => {
-    // backend clears pickup metadata -> refresh order so UI resets
+    // backend clears pickup metadata keys
     await qc.invalidateQueries({ queryKey: ["admin-order", orderId] })
-    await qc.invalidateQueries({ queryKey: ["freightcom-pickup", orderId] })
+    await qc.invalidateQueries({ queryKey: ["freightcom-pickup", orderId, shipmentIdFromMeta] })
   },
 })
   // Poll while processing
@@ -931,6 +930,7 @@ const cancelPickup = useMutation({
           </FocusModal.Body>
         </FocusModal.Content>
       </FocusModal>
+
       <FocusModal open={isPickupModalOpen} onOpenChange={setIsPickupModalOpen}>
   <FocusModal.Content className="h-[85vh] w-[95vw] max-w-none overflow-hidden">
     <FocusModal.Header>
@@ -947,9 +947,31 @@ const cancelPickup = useMutation({
         <Text size="small" className="text-ui-fg-subtle">Book a shipment first.</Text>
       ) : (
         <div className="space-y-4">
-          {/* Current status */}
+          {/* Current pickup */}
           <div className="rounded-md border border-ui-border-base p-3">
-            <Text size="small" className="text-ui-fg-subtle">Current pickup</Text>
+            <div className="flex items-center justify-between gap-2">
+              <Text size="small" className="text-ui-fg-subtle">Current pickup</Text>
+
+              <div className="flex items-center gap-2">
+                <Button
+                  size="small"
+                  variant="secondary"
+                  onClick={() => qc.invalidateQueries({ queryKey: ["freightcom-pickup", orderId, shipmentIdFromMeta] })}
+                  disabled={pickupQuery.isPending}
+                >
+                  {pickupQuery.isPending ? "Refreshing…" : "Refresh"}
+                </Button>
+
+                <Button
+                  size="small"
+                  variant="danger"
+                  onClick={() => cancelPickup.mutate()}
+                  disabled={cancelPickup.isPending}
+                >
+                  {cancelPickup.isPending ? "Cancelling…" : "Cancel pickup"}
+                </Button>
+              </div>
+            </div>
 
             {pickupQuery.isPending ? (
               <Text size="small" className="text-ui-fg-subtle mt-2">Loading…</Text>
@@ -959,39 +981,21 @@ const cancelPickup = useMutation({
               </Text>
             ) : (
               <>
-                <Text className="font-medium mt-1">
+                <Text className="font-medium mt-2">
                   Status: {pickupStatusFromMeta || pickupQuery.data?.status || "—"}
                 </Text>
+
                 <Text size="small" className="text-ui-fg-subtle">
                   Confirmation: {pickupConfirmationFromMeta || pickupQuery.data?.pickup_confirmation_number || "—"}
                 </Text>
-                {pickupLastScheduledAt ? (
-                  <Text size="small" className="text-ui-fg-subtle">Scheduled at: {pickupLastScheduledAt}</Text>
-                ) : null}
+
                 {pickupQuery.data?.error ? (
-                  <Text size="small" className="text-ui-fg-error mt-2">{pickupQuery.data.error}</Text>
+                  <Text size="small" className="text-ui-fg-error mt-2">
+                    {pickupQuery.data.error}
+                  </Text>
                 ) : null}
               </>
             )}
-
-            <div className="flex items-center gap-2 mt-3">
-              <Button
-                size="small"
-                variant="secondary"
-                onClick={() => qc.invalidateQueries({ queryKey: ["freightcom-pickup", orderId] })}
-              >
-                Refresh
-              </Button>
-
-              <Button
-                size="small"
-                variant="danger"
-                onClick={() => cancelPickup.mutate()}
-                disabled={cancelPickup.isPending}
-              >
-                {cancelPickup.isPending ? "Cancelling…" : "Cancel pickup"}
-              </Button>
-            </div>
           </div>
 
           {/* Schedule form */}
@@ -1066,12 +1070,21 @@ const cancelPickup = useMutation({
               </div>
             </div>
 
-            <Button
-              onClick={() => schedulePickup.mutate()}
-              disabled={schedulePickup.isPending}
-            >
+            <Button onClick={() => schedulePickup.mutate()} disabled={schedulePickup.isPending}>
               {schedulePickup.isPending ? "Scheduling…" : "Schedule pickup"}
             </Button>
+
+            {schedulePickup.isError ? (
+              <Text size="small" className="text-ui-fg-error">
+                {String((schedulePickup.error as any)?.message || "Error")}
+              </Text>
+            ) : null}
+
+            {cancelPickup.isError ? (
+              <Text size="small" className="text-ui-fg-error">
+                {String((cancelPickup.error as any)?.message || "Error")}
+              </Text>
+            ) : null}
           </div>
         </div>
       )}
