@@ -295,6 +295,7 @@ const destination = {
   phone_number: {
     number: destinationPhone,
   },
+  contact_name: `${ship.first_name || ""} ${ship.last_name || ""}`.trim() || "Customer",
   residential: true,
   email_addresses: order.email ? [order.email] : [],
   receives_email_updates: true,
