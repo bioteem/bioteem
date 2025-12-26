@@ -21,6 +21,8 @@ const SUBSCRIPTIONS_SHIPPING_OPTION_ID =
 const SUBSCRIPTIONS_PAYMENT_PROVIDER_ID =
   process.env.SUBSCRIPTIONS_PAYMENT_PROVIDER_ID || "pp_system_default"
 
+
+  
 type AnyObj = Record<string, any>
 
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
@@ -474,29 +476,30 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           break
         }
 
-        const firstLine = invoiceAny.lines?.data?.[0]
-        const period = firstLine?.period
+ const firstLine = invoiceAny.lines?.data?.[0]
+const period = firstLine?.period
 
-        let stripeUnitAmountCents: number | null =
-          firstLine?.price?.unit_amount ?? null
+const qty = (firstLine?.quantity ?? 1) as number
 
-        if (
-          stripeUnitAmountCents == null &&
-          typeof invoiceAny.amount_paid === "number"
-        ) {
-          const qty = firstLine?.quantity ?? 1
-          stripeUnitAmountCents = Math.round(invoiceAny.amount_paid / qty)
-        }
+// Prefer the line's amount (already in cents). This matches what Stripe actually charged for the line.
+const lineAmountCents: number | null =
+  typeof firstLine?.amount === "number"
+    ? firstLine.amount
+    : typeof firstLine?.subtotal === "number"
+      ? firstLine.subtotal
+      : typeof firstLine?.price?.unit_amount === "number"
+        ? firstLine.price.unit_amount * qty
+        : typeof invoiceAny.amount_paid === "number"
+          ? invoiceAny.amount_paid
+          : null
 
-        if (stripeUnitAmountCents == null) {
-          console.warn(
-            "[subscriptions] Could not determine Stripe unit amount for invoice",
-            invoiceAny.id
-          )
-          break
-        }
+if (lineAmountCents == null) {
+  console.warn("[subscriptions] Could not determine Stripe line amount (cents) for invoice", invoiceAny.id)
+  break
+}
 
-        const unitPriceFromStripe = Math.round(stripeUnitAmountCents / 100)
+// Unit price in cents (Medusa expects minor units)
+const unitPriceCents = Math.round(lineAmountCents / qty)
         const currency = (invoiceAny.currency as string).toLowerCase()
 
         let createdOrder: AnyObj | null = null
@@ -604,7 +607,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
               stripe_invoice_id: invoiceAny.id,
               stripe_customer_id: sub.stripe_customer_id,
               subscription_plan_name: plan.name,
-              stripe_unit_price: unitPriceFromStripe,
+              stripe_unit_price: unitPriceCents,
             },
           }
 
@@ -613,12 +616,25 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           console.log("[subscriptions] Created cart", cart.id, "for subscription", sub.id)
 
           // 4) Add subscription line item
-          await addToCartWorkflow(req.scope).run({
-            input: {
-              cart_id: cart.id,
-              items: [{ variant_id: variantId, quantity: 1 }],
-            },
-          })
+await addToCartWorkflow(req.scope).run({
+  input: {
+    cart_id: cart.id,
+    items: [
+      {
+        variant_id: variantId,
+        quantity: qty,
+        unit_price: unitPriceCents, // ✅ custom price reflected in Medusa order totals
+        metadata: {
+          pricing_source: "stripe_invoice",
+          stripe_invoice_id: invoiceAny.id,
+          stripe_subscription_id: stripeSubId,
+          stripe_line_amount_cents: lineAmountCents,
+          stripe_unit_price_cents: unitPriceCents,
+        },
+      },
+    ],
+  },
+})
 
           console.log("[subscriptions] Added variant to cart", variantId, "cart", cart.id)
 
