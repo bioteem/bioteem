@@ -298,28 +298,38 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
 
     // ✅ Save to order metadata (as you requested)
 // ✅ Save to order metadata (flat keys so Admin UI shows them clearly)
+// ✅ Save to order metadata (keep object + add flat shipment id)
+// ✅ Also delete any legacy freightcom_* flat keys from earlier attempts
 const prevMeta = (order.metadata || {}) as Record<string, any>
 
+// remove legacy flat keys (keep the object key `freightcom` itself)
+const cleanedMeta: Record<string, any> = { ...prevMeta }
+for (const k of Object.keys(cleanedMeta)) {
+  if (k.startsWith("freightcom_")) delete cleanedMeta[k]
+}
+
+// build the freightcom object snapshot you want to keep
+const freightcomObj = {
+  ...(typeof cleanedMeta.freightcom === "object" && cleanedMeta.freightcom ? cleanedMeta.freightcom : {}),
+  booked_at: new Date().toISOString(),
+  shipment_id,
+  tracking_url,
+  tracking_number,
+  label_url,
+  service_id,
+  carrier_name: carrier_name ?? null,
+  service_name: service_name ?? null,
+  quoted_total: quoted_total ?? null,
+}
+
 const nextMeta: Record<string, any> = {
-  ...prevMeta,
+  ...cleanedMeta,
 
-  // core shipment linkage
+  // ✅ flat key so widget can ALWAYS find it after reload
   freightcom_shipment_id: shipment_id,
-  freightcom_booked_at: new Date().toISOString(),
 
-  // tracking/label (if available)
-  freightcom_tracking_url: tracking_url ?? null,
-  freightcom_tracking_number: tracking_number ?? null,
-  freightcom_label_url: label_url ?? null,
-
-  // what was booked
-  freightcom_service_id: service_id,
-  freightcom_carrier_name: carrier_name ?? null,
-  freightcom_service_name: service_name ?? null,
-
-  // quoted total (store primitives for easy viewing)
-  freightcom_quoted_total_value: quoted_total?.value ?? null,
-  freightcom_quoted_total_currency: quoted_total?.currency ?? null,
+  // ✅ keep full object
+  freightcom: freightcomObj,
 }
 
 const orderModule = req.scope.resolve<IOrderModuleService>(Modules.ORDER)

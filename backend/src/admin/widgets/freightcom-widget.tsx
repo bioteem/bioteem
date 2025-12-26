@@ -756,6 +756,11 @@ setPersistedShipmentId(id)
           fetchShipmentDetails.mutate({ shipment_id: existingShipmentId })
         }}
       >
+        {(fetchShipmentDetails.error as any)?.message ? (
+  <Text size="small" className="text-ui-fg-error">
+    {String((fetchShipmentDetails.error as any).message)}
+  </Text>
+) : null}
         <FocusModal.Content className="h-[95vh] w-[95vw] max-w-none overflow-hidden">
           <FocusModal.Header>
             <div className="flex items-center justify-between w-full">

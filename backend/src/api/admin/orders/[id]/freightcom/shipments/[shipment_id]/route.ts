@@ -8,7 +8,7 @@ function requireEnv(name: string) {
   return v
 }
 
-async function freightcomRequest(path: string, opts?: { method?: string; body?: any }) {
+async function freightcomRequest(path: string, opts?: { method?: string; body?: any; timeoutMs?: number }) {
   const base = requireEnv("FREIGHTCOM_API_BASE_URL")
   const key = requireEnv("FREIGHTCOM_API_KEY")
   const url = `${base}${path}`
@@ -16,25 +16,34 @@ async function freightcomRequest(path: string, opts?: { method?: string; body?: 
   const method = opts?.method || "GET"
   const body = opts?.body ? JSON.stringify(opts.body, null, 2) : undefined
 
-  const res = await fetch(url, {
-    method,
-    headers: { "Content-Type": "application/json", Authorization: key },
-    body,
-  })
+  const controller = new AbortController()
+  const timeoutMs = opts?.timeoutMs ?? 20000 // 20s
+  const t = setTimeout(() => controller.abort(), timeoutMs)
 
-  const text = await res.text().catch(() => "")
-  let json: any = null
   try {
-    json = text ? JSON.parse(text) : null
-  } catch {
-    json = null
-  }
+    const res = await fetch(url, {
+      method,
+      headers: { "Content-Type": "application/json", Authorization: key },
+      body,
+      signal: controller.signal,
+    })
 
-  if (!res.ok) {
-    throw new Error(`Freightcom ${res.status}: ${JSON.stringify(json ?? { raw: text })}`)
-  }
+    const text = await res.text().catch(() => "")
+    let json: any = null
+    try {
+      json = text ? JSON.parse(text) : null
+    } catch {
+      json = null
+    }
 
-  return json ?? { raw: text }
+    if (!res.ok) {
+      throw new Error(`Freightcom ${res.status}: ${JSON.stringify(json ?? { raw: text })}`)
+    }
+
+    return json ?? { raw: text }
+  } finally {
+    clearTimeout(t)
+  }
 }
 
 export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
@@ -42,9 +51,18 @@ export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
     const shipmentId = req.params.shipment_id
     if (!shipmentId) return res.status(400).json({ message: "Missing shipment_id" })
 
-    const data = await freightcomRequest(`/shipment/${shipmentId}`, { method: "GET" })
-    return res.status(200).json(data)
+    const data = await freightcomRequest(`/shipment/${shipmentId}`, { method: "GET", timeoutMs: 20000 })
+
+    // ✅ Always normalize for the widget
+    const shipment = data?.shipment ?? data
+
+    return res.status(200).json({ shipment })
   } catch (e: any) {
-    return res.status(500).json({ message: e?.message || "Unknown error" })
+    const msg =
+      e?.name === "AbortError"
+        ? "Freightcom request timed out while loading shipment."
+        : e?.message || "Unknown error"
+
+    return res.status(500).json({ message: msg })
   }
 }
