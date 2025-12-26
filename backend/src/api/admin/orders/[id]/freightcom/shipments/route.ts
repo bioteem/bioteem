@@ -297,25 +297,33 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     const label_url = extractLabelUrlFromShipment(shipment)
 
     // ✅ Save to order metadata (as you requested)
-    const prevMeta = (order.metadata || {}) as Record<string, any>
-    const nextMeta = {
-      ...prevMeta,
-      freightcom: {
-        ...(prevMeta.freightcom || {}),
-        booked_at: new Date().toISOString(),
-        shipment_id,
-        tracking_url,
-        tracking_number,
-        label_url,
-        service_id,
-        carrier_name: carrier_name ?? null,
-        service_name: service_name ?? null,
-        quoted_total: quoted_total ?? null,
-      },
-    }
+// ✅ Save to order metadata (flat keys so Admin UI shows them clearly)
+const prevMeta = (order.metadata || {}) as Record<string, any>
 
-    const orderModule = req.scope.resolve<IOrderModuleService>(Modules.ORDER)
-    await orderModule.updateOrders(orderId, { metadata: nextMeta })
+const nextMeta: Record<string, any> = {
+  ...prevMeta,
+
+  // core shipment linkage
+  freightcom_shipment_id: shipment_id,
+  freightcom_booked_at: new Date().toISOString(),
+
+  // tracking/label (if available)
+  freightcom_tracking_url: tracking_url ?? null,
+  freightcom_tracking_number: tracking_number ?? null,
+  freightcom_label_url: label_url ?? null,
+
+  // what was booked
+  freightcom_service_id: service_id,
+  freightcom_carrier_name: carrier_name ?? null,
+  freightcom_service_name: service_name ?? null,
+
+  // quoted total (store primitives for easy viewing)
+  freightcom_quoted_total_value: quoted_total?.value ?? null,
+  freightcom_quoted_total_currency: quoted_total?.currency ?? null,
+}
+
+const orderModule = req.scope.resolve<IOrderModuleService>(Modules.ORDER)
+await orderModule.updateOrders(orderId, { metadata: nextMeta })
 
     return res.status(200).json({
       shipment_id,

@@ -200,7 +200,7 @@ export default function FreightcomRatesWidget({ data }: any) {
     if (!orderId) return
 
     // try widget data first
-    const fromData = (order?.metadata?.freightcom?.shipment_id as string | undefined) ?? null
+    const fromData = (order?.metadata?.freightcom_shipment_id as string | undefined) ?? null
     if (fromData) {
       setPersistedShipmentId(fromData)
       return
@@ -210,11 +210,8 @@ export default function FreightcomRatesWidget({ data }: any) {
     ;(async () => {
       try {
         const resp = await sdk.client.fetch<any>(`/admin/orders/${orderId}`)
-        const id =
-          (resp?.order?.metadata?.freightcom?.shipment_id as string | undefined) ??
-          (resp?.metadata?.freightcom?.shipment_id as string | undefined) ??
-          null
-        setPersistedShipmentId(id)
+const id = (resp?.order?.metadata?.freightcom_shipment_id as string | undefined) ?? null
+setPersistedShipmentId(id)
       } catch {
         setPersistedShipmentId(null)
       } finally {
