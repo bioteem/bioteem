@@ -80,9 +80,6 @@ export default function SplitSection({
 
       <Heading
         level="h2"
-        className={[
-          "text-ui-fg-base",
-        ].join(" ")}
       >
         {title}
       </Heading>
