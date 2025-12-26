@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from "react"
 import { defineWidgetConfig } from "@medusajs/admin-sdk"
-import { Container, Heading, Button, Text, Badge, FocusModal } from "@medusajs/ui"
+import {
+  Container,
+  Heading,
+  Button,
+  Text,
+  Badge,
+  FocusModal,
+} from "@medusajs/ui"
 import { useMutation } from "@tanstack/react-query"
 import { sdk } from "../lib/sdk"
 
@@ -30,19 +37,26 @@ type Preview = {
   packages_preview?: any[]
 }
 
-type PostResp =
-  | { request_id: string; status: "processing"; status_meta?: any; preview?: Preview }
-  | {
-      request_id: string
-      status: "ready"
-      status_meta?: any
-      preview?: Preview
-      rates?: FreightcomRate[]
-      rates_total?: number
-      offset?: number
-      limit?: number
-      next_offset?: number
-    }
+type ReadyResp = {
+  request_id: string
+  status: "ready"
+  status_meta?: any
+  preview?: Preview
+  rates?: FreightcomRate[]
+  rates_total?: number
+  offset?: number
+  limit?: number
+  next_offset?: number
+}
+
+type ProcessingResp = {
+  request_id: string
+  status: "processing"
+  status_meta?: any
+  preview?: Preview
+}
+
+type PostResp = ReadyResp | ProcessingResp
 
 function getOrderFromWidgetData(data: any) {
   return data?.order ?? data?.resource ?? data ?? null
@@ -59,7 +73,9 @@ function formatJsonDate(d?: JsonDate) {
 function moneyLabel(m?: Money) {
   if (!m?.value) return "—"
   const cents = Number(m.value)
-  if (Number.isFinite(cents)) return `${(Math.round(cents) / 100).toFixed(2)} ${m.currency || ""}`.trim()
+  if (Number.isFinite(cents)) {
+    return `${(Math.round(cents) / 100).toFixed(2)} ${m.currency || ""}`.trim()
+  }
   return `${m.value} ${m.currency || ""}`.trim()
 }
 
@@ -67,25 +83,77 @@ export default function FreightcomRatesWidget({ data }: any) {
   const order = getOrderFromWidgetData(data)
   const orderId = order?.id
 
-  const [resp, setResp] = useState<PostResp | null>(null)
-  const [isModalOpen, setIsModalOpen] = useState(false)
-  const [selectedServiceId, setSelectedServiceId] = useState<string | null>(null)
-
-  // package override fields (simple version)
+  // Package override fields
   const [unitSystem, setUnitSystem] = useState<"metric" | "imperial">("metric")
   const [defWeightG, setDefWeightG] = useState(500)
   const [defLCm, setDefLCm] = useState(20)
   const [defWCm, setDefWCm] = useState(15)
   const [defHCm, setDefHCm] = useState(10)
 
-  const requestId = resp?.request_id
+  // modal / selection
+  const [isModalOpen, setIsModalOpen] = useState(false)
+  const [selectedServiceId, setSelectedServiceId] = useState<string | null>(null)
+
+  // Keep pages locally so refresh doesn't lose old options
+  const [pages, setPages] = useState<FreightcomRate[][]>([])
+  const [pageIndex, setPageIndex] = useState(0)
+
+  // Tracking backend cursor
+  const [cursorOffsets, setCursorOffsets] = useState<number[]>([0]) // offsets per page
+  const [respMeta, setRespMeta] = useState<{
+    request_id: string | null
+    status: "idle" | "processing" | "ready"
+    status_meta?: any
+    preview?: Preview
+    rates_total?: number
+    next_offset?: number
+  }>({ request_id: null, status: "idle" })
+
+  const requestId = respMeta.request_id
+  const done = respMeta.status === "ready"
+
+  const ship = order?.shipping_address
+  const destinationPreview = useMemo(() => {
+    return {
+      name:
+        `${ship?.first_name || ""} ${ship?.last_name || ""}`.trim() || "Customer",
+      address: {
+        address_line_1: ship?.address_1 || "—",
+        address_line_2: ship?.address_2 || "",
+        unit_number: ship?.company || "",
+        city: ship?.city || "—",
+        region: ship?.province || "—",
+        country: (ship?.country_code || "—").toUpperCase(),
+        postal_code: ship?.postal_code || "—",
+      },
+      email: order?.email || "—",
+    }
+  }, [ship, order?.email])
+
+  const headerBadge = useMemo(() => {
+    if (!requestId) return <Badge size="small" color="grey">Not started</Badge>
+    if (done) return <Badge size="small" color="green">Ready</Badge>
+    return <Badge size="small" color="orange">Processing</Badge>
+  }, [requestId, done])
+
+  const currentRates = pages[pageIndex] || []
+
+  const selectedRate = useMemo(() => {
+    if (!selectedServiceId) return null
+    // search all pages so selection stays consistent
+    for (const p of pages) {
+      const r = p.find((x) => x.service_id === selectedServiceId)
+      if (r) return r
+    }
+    return null
+  }, [pages, selectedServiceId])
 
   const callRates = useMutation({
-    mutationFn: async (vars: { offset?: number }) => {
+    mutationFn: async (vars: { offset: number; openModalOnReady?: boolean }) => {
       if (!orderId) throw new Error("Missing orderId")
 
       const body = {
-        offset: vars.offset ?? 0,
+        offset: vars.offset,
         limit: 10,
         package_overrides: {
           unit_system: unitSystem,
@@ -101,54 +169,96 @@ export default function FreightcomRatesWidget({ data }: any) {
         body,
       })
     },
-    onSuccess: (r) => {
-      setResp(r)
+    onSuccess: (r: PostResp, vars) => {
+      setRespMeta((prev) => ({
+        request_id: r.request_id,
+        status: r.status === "ready" ? "ready" : "processing",
+        status_meta: (r as any).status_meta,
+        preview: (r as any).preview,
+        rates_total: (r as any).rates_total,
+        next_offset: (r as any).next_offset,
+      }))
 
-      if (r.status === "ready" && Array.isArray(r.rates) && r.rates.length) {
-        // open modal when ready
-        setSelectedServiceId((prev) => prev ?? r.rates![0].service_id)
-        setIsModalOpen(true)
+      if (r.status === "ready") {
+        const pageRates = (r.rates || []) as FreightcomRate[]
+
+        // if this offset already exists in cursorOffsets, replace that page
+        setPages((prev) => {
+          const idx = cursorOffsets.indexOf(vars.offset)
+          if (idx >= 0) {
+            const copy = [...prev]
+            copy[idx] = pageRates
+            return copy
+          }
+          // else append a new page
+          return [...prev, pageRates]
+        })
+
+        setCursorOffsets((prev) => {
+          if (prev.includes(vars.offset)) return prev
+          return [...prev, vars.offset]
+        })
+
+        // set current page index to the page for this offset
+        setPageIndex(() => {
+          const idx = cursorOffsets.indexOf(vars.offset)
+          if (idx >= 0) return idx
+          return cursorOffsets.length // it will be appended
+        })
+
+        // select first option if nothing selected
+        if (!selectedServiceId && pageRates.length) {
+          setSelectedServiceId(pageRates[0].service_id)
+        }
+
+        if (vars.openModalOnReady) setIsModalOpen(true)
       } else {
-        // processing: keep modal closed
+        // keep modal closed while processing
         setIsModalOpen(false)
       }
     },
   })
 
-  // If processing, keep polling until ready (same request “session” on your backend)
+  // Poll while processing (stay on offset 0)
   useEffect(() => {
-    if (!resp) return
-    if (resp.status !== "processing") return
+    if (respMeta.status !== "processing") return
     let cancelled = false
-
-    const tick = async () => {
-      if (cancelled) return
-      // call again (offset 0) to get ready + top 10
-      callRates.mutate({ offset: 0 })
-    }
-
-    const t = setTimeout(tick, 1200)
+    const t = setTimeout(() => {
+      if (!cancelled) callRates.mutate({ offset: 0, openModalOnReady: true })
+    }, 1200)
     return () => {
       cancelled = true
       clearTimeout(t)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resp?.status])
+  }, [respMeta.status])
 
-  const done = resp?.status === "ready"
-  const preview = resp?.preview
-  const rates = (resp && resp.status === "ready" ? resp.rates || [] : []) as FreightcomRate[]
+  const startGetRates = () => {
+    // reset pages for a new "session"
+    setPages([])
+    setCursorOffsets([0])
+    setPageIndex(0)
+    setSelectedServiceId(null)
+    setRespMeta({ request_id: null, status: "idle" })
 
-  const headerBadge = useMemo(() => {
-    if (!requestId) return <Badge size="small" color="grey">Not started</Badge>
-    if (done) return <Badge size="small" color="green">Ready</Badge>
-    return <Badge size="small" color="orange">Processing</Badge>
-  }, [requestId, done])
+    callRates.mutate({ offset: 0, openModalOnReady: true })
+  }
 
-  const selectedRate = useMemo(() => {
-    if (!selectedServiceId) return null
-    return rates.find((r) => r.service_id === selectedServiceId) || null
-  }, [rates, selectedServiceId])
+  const goNext = () => {
+    if (!done) return
+    const nextOffset = respMeta.next_offset ?? 0
+    // If nextOffset already loaded, just move
+    const idx = cursorOffsets.indexOf(nextOffset)
+    if (idx >= 0) {
+      setPageIndex(idx)
+      return
+    }
+    callRates.mutate({ offset: nextOffset, openModalOnReady: true })
+  }
+
+  const goPrev = () => {
+    setPageIndex((p) => Math.max(0, p - 1))
+  }
 
   return (
     <Container className="divide-y p-0">
@@ -156,30 +266,31 @@ export default function FreightcomRatesWidget({ data }: any) {
         <div className="min-w-0">
           <Heading level="h2">Freightcom Rates</Heading>
           <Text size="small" className="text-ui-fg-subtle">
-            Get top shipping options (10 at a time). Refresh to see other options.
+            Get top shipping options (10 at a time). Use Next/Prev to page through.
           </Text>
 
           <div className="mt-2 flex items-center gap-2 flex-wrap">
             {headerBadge}
             {requestId ? (
-              <Text size="small" className="text-ui-fg-subtle break-all">Request: {requestId}</Text>
+              <Text size="small" className="text-ui-fg-subtle break-all">
+                Request: {requestId}
+              </Text>
             ) : null}
-            {resp?.status_meta ? (
+            {respMeta.status_meta ? (
               <Text size="small" className="text-ui-fg-subtle">
-                {resp.status_meta.complete}/{resp.status_meta.total} complete
+                {respMeta.status_meta.complete}/{respMeta.status_meta.total} complete
               </Text>
             ) : null}
           </div>
         </div>
 
         <div className="flex items-center gap-2">
-          <Button onClick={() => callRates.mutate({ offset: 0 })} disabled={!orderId || callRates.isPending}>
+          <Button onClick={startGetRates} disabled={!orderId || callRates.isPending}>
             {callRates.isPending ? "Working…" : "Get Rates"}
           </Button>
         </div>
       </div>
 
-      {/* Package override fields */}
       <div className="px-6 py-4 space-y-3">
         {callRates.isError && (
           <Text size="small" className="text-ui-fg-error">
@@ -187,24 +298,42 @@ export default function FreightcomRatesWidget({ data }: any) {
           </Text>
         )}
 
+        {/* Destination preview BEFORE click */}
+        <div className="rounded-md border border-ui-border-base p-3">
+          <Text size="small" className="text-ui-fg-subtle">Destination (from order)</Text>
+          <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="rounded border border-ui-border-base p-2">
+              <Text size="xsmall" className="text-ui-fg-subtle">Recipient</Text>
+              <Text size="small">{destinationPreview.name}</Text>
+              <Text size="small" className="text-ui-fg-subtle">Email: {destinationPreview.email}</Text>
+            </div>
+            <div className="rounded border border-ui-border-base p-2">
+              <Text size="xsmall" className="text-ui-fg-subtle">Address</Text>
+              <Text size="small">{destinationPreview.address.address_line_1}</Text>
+              <Text size="small" className="text-ui-fg-subtle">
+                {destinationPreview.address.city}, {destinationPreview.address.region}{" "}
+                {destinationPreview.address.postal_code}
+              </Text>
+              <Text size="small" className="text-ui-fg-subtle">
+                {destinationPreview.address.country}
+              </Text>
+            </div>
+          </div>
+        </div>
+
+        {/* Package override fields */}
         <div className="rounded-md border border-ui-border-base p-3 space-y-3">
-          <Text size="small" className="text-ui-fg-subtle">Package defaults (used when product variant dims/weight are missing)</Text>
+          <Text size="small" className="text-ui-fg-subtle">
+            Package defaults (used when variant dims/weight are missing)
+          </Text>
 
           <div className="flex items-center gap-3 flex-wrap">
             <label className="flex items-center gap-2 text-sm">
-              <input
-                type="radio"
-                checked={unitSystem === "metric"}
-                onChange={() => setUnitSystem("metric")}
-              />
+              <input type="radio" checked={unitSystem === "metric"} onChange={() => setUnitSystem("metric")} />
               Metric (cm/kg)
             </label>
             <label className="flex items-center gap-2 text-sm">
-              <input
-                type="radio"
-                checked={unitSystem === "imperial"}
-                onChange={() => setUnitSystem("imperial")}
-              />
+              <input type="radio" checked={unitSystem === "imperial"} onChange={() => setUnitSystem("imperial")} />
               Imperial (in/lb)
             </label>
           </div>
@@ -229,45 +358,17 @@ export default function FreightcomRatesWidget({ data }: any) {
           </div>
         </div>
 
-        {/* Preview panel from backend (fixes 0/0/0) */}
+        {/* Backend preview (after click) */}
         <div className="rounded-md border border-ui-border-base p-3">
-          <Text size="small" className="text-ui-fg-subtle">What will be sent to Freightcom (backend preview)</Text>
-
-          {!preview ? (
+          <Text size="small" className="text-ui-fg-subtle">Backend preview (what will be sent)</Text>
+          {!respMeta.preview ? (
             <Text size="small" className="text-ui-fg-subtle mt-2">
-              Click <span className="font-medium">Get Rates</span> to generate a preview.
+              Click <span className="font-medium">Get Rates</span> to generate the full payload preview.
             </Text>
           ) : (
-            <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div className="rounded border border-ui-border-base p-2">
-                <Text size="xsmall" className="text-ui-fg-subtle">Origin</Text>
-                <Text size="small">{preview.origin?.name}</Text>
-                <Text size="small" className="text-ui-fg-subtle">
-                  {preview.origin?.address?.unit_number} {preview.origin?.address?.address_line_1},{" "}
-                  {preview.origin?.address?.city} {preview.origin?.address?.region} {preview.origin?.address?.postal_code}
-                </Text>
-              </div>
-
-              <div className="rounded border border-ui-border-base p-2">
-                <Text size="xsmall" className="text-ui-fg-subtle">Destination</Text>
-                <Text size="small">{preview.destination?.name}</Text>
-                <Text size="small" className="text-ui-fg-subtle">
-                  {preview.destination?.address?.address_line_1},{" "}
-                  {preview.destination?.address?.city} {preview.destination?.address?.region} {preview.destination?.address?.postal_code}
-                </Text>
-              </div>
-
-              <div className="rounded border border-ui-border-base p-2 md:col-span-2">
-                <Text size="xsmall" className="text-ui-fg-subtle">Package debug</Text>
-                <Text size="small" className="text-ui-fg-subtle">
-                  Items: {preview.package_debug?.total_items ?? "—"} • Defaults used for: {preview.package_debug?.used_defaults_for ?? "—"} • Sum weight(g): {Math.round(preview.package_debug?.sum_weight_g ?? 0)}
-                </Text>
-                <Text size="xsmall" className="text-ui-fg-subtle mt-2">Sample packages</Text>
-                <pre className="text-xs mt-1 p-2 bg-ui-bg-subtle rounded overflow-auto max-h-40">
-{JSON.stringify(preview.packages_preview ?? [], null, 2)}
-                </pre>
-              </div>
-            </div>
+            <pre className="text-xs mt-2 p-2 bg-ui-bg-subtle rounded overflow-auto max-h-48">
+{JSON.stringify(respMeta.preview, null, 2)}
+            </pre>
           )}
 
           {requestId && !done && (
@@ -278,25 +379,33 @@ export default function FreightcomRatesWidget({ data }: any) {
         </div>
       </div>
 
-      {/* Modal */}
+      {/* Full page modal */}
       <FocusModal open={isModalOpen} onOpenChange={setIsModalOpen}>
-        <FocusModal.Content className="max-h-[85vh] overflow-hidden">
+        <FocusModal.Content className="h-[95vh] w-[95vw] max-w-none overflow-hidden">
           <FocusModal.Header>
             <div className="flex items-center justify-between w-full">
-              <Heading level="h2">Top Shipping Options</Heading>
+              <Heading level="h2">Shipping Options</Heading>
+
               <div className="flex items-center gap-2">
+                <Text size="small" className="text-ui-fg-subtle">
+                  Page {pageIndex + 1} / {Math.max(1, pages.length)}
+                </Text>
+
                 <Button
                   size="small"
                   variant="secondary"
-                  onClick={() => {
-                    // refresh shows next 10 options
-                    if (resp && resp.status === "ready") {
-                      callRates.mutate({ offset: resp.next_offset ?? 0 })
-                    }
-                  }}
+                  onClick={goPrev}
+                  disabled={pageIndex === 0 || callRates.isPending}
+                >
+                  Prev
+                </Button>
+                <Button
+                  size="small"
+                  variant="secondary"
+                  onClick={goNext}
                   disabled={!done || callRates.isPending}
                 >
-                  Refresh Rates
+                  Next
                 </Button>
 
                 <FocusModal.Close asChild>
@@ -306,14 +415,33 @@ export default function FreightcomRatesWidget({ data }: any) {
             </div>
           </FocusModal.Header>
 
-          <FocusModal.Body className="p-6 overflow-y-auto max-h-[70vh]">
+          <FocusModal.Body className="p-6 overflow-y-auto h-[calc(95vh-64px)]">
+            {/* Selected on top */}
+            <div className="mb-4 rounded-md border border-ui-border-base p-3">
+              <Text size="small" className="text-ui-fg-subtle">Selected</Text>
+              {selectedRate ? (
+                <>
+                  <Text className="font-medium">
+                    {(selectedRate.carrier_name || "Carrier")} • {(selectedRate.service_name || selectedRate.service_id)}
+                  </Text>
+                  <Text size="small" className="text-ui-fg-subtle">
+                    Total: {moneyLabel(selectedRate.total)} • Transit:{" "}
+                    {selectedRate.transit_time_not_available ? "N/A" : `${selectedRate.transit_time_days} days`} • Valid:{" "}
+                    {formatJsonDate(selectedRate.valid_until)}
+                  </Text>
+                </>
+              ) : (
+                <Text size="small" className="text-ui-fg-subtle">Pick one of the options below.</Text>
+              )}
+            </div>
+
             {!done ? (
               <Text size="small" className="text-ui-fg-subtle">Processing…</Text>
-            ) : rates.length === 0 ? (
+            ) : currentRates.length === 0 ? (
               <Text size="small" className="text-ui-fg-subtle">No rates returned.</Text>
             ) : (
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                {rates.map((r) => {
+                {currentRates.map((r) => {
                   const isSelected = selectedServiceId === r.service_id
                   return (
                     <button
@@ -322,7 +450,9 @@ export default function FreightcomRatesWidget({ data }: any) {
                       onClick={() => setSelectedServiceId(r.service_id)}
                       className={[
                         "text-left rounded-md border p-3 transition w-full",
-                        isSelected ? "border-ui-fg-base bg-ui-bg-base" : "border-ui-border-base hover:border-ui-fg-subtle",
+                        isSelected
+                          ? "border-ui-fg-base bg-ui-bg-base"
+                          : "border-ui-border-base hover:border-ui-fg-subtle",
                       ].join(" ")}
                     >
                       <div className="flex items-start justify-between gap-3">
@@ -330,28 +460,40 @@ export default function FreightcomRatesWidget({ data }: any) {
                           <Text className="font-medium">
                             {(r.carrier_name || "Carrier")} • {(r.service_name || r.service_id)}
                           </Text>
-                          <Text size="small" className="text-ui-fg-subtle break-all">{r.service_id}</Text>
+                          <Text size="small" className="text-ui-fg-subtle break-all">
+                            {r.service_id}
+                          </Text>
                         </div>
-                        {r.paperless ? <Badge size="small" color="green">Paperless</Badge> : <Badge size="small" color="grey">Std</Badge>}
+                        {r.paperless ? (
+                          <Badge size="small" color="green">Paperless</Badge>
+                        ) : (
+                          <Badge size="small" color="grey">Std</Badge>
+                        )}
                       </div>
 
                       <div className="mt-2 grid grid-cols-3 gap-2">
                         <div className="rounded border border-ui-border-base p-2">
                           <Text size="xsmall" className="text-ui-fg-subtle">Total</Text>
                           <Text className="font-medium">{moneyLabel(r.total)}</Text>
-                          <Text size="xsmall" className="text-ui-fg-subtle">Base: {moneyLabel(r.base)}</Text>
+                          <Text size="xsmall" className="text-ui-fg-subtle">
+                            Base: {moneyLabel(r.base)}
+                          </Text>
                         </div>
 
                         <div className="rounded border border-ui-border-base p-2">
                           <Text size="xsmall" className="text-ui-fg-subtle">Transit</Text>
-                          <Text className="font-medium">{r.transit_time_not_available ? "N/A" : `${r.transit_time_days} days`}</Text>
-                          <Text size="xsmall" className="text-ui-fg-subtle">Valid: {formatJsonDate(r.valid_until)}</Text>
+                          <Text className="font-medium">
+                            {r.transit_time_not_available ? "N/A" : `${r.transit_time_days} days`}
+                          </Text>
+                          <Text size="xsmall" className="text-ui-fg-subtle">
+                            Valid: {formatJsonDate(r.valid_until)}
+                          </Text>
                         </div>
 
                         <div className="rounded border border-ui-border-base p-2">
-                          <Text size="xsmall" className="text-ui-fg-subtle">Rank pool</Text>
+                          <Text size="xsmall" className="text-ui-fg-subtle">Pool</Text>
                           <Text size="small" className="text-ui-fg-subtle">
-                            Showing 10 / {resp?.status === "ready" ? resp.rates_total ?? "?" : "?"}
+                            Showing {currentRates.length} / {respMeta.rates_total ?? "?"}
                           </Text>
                         </div>
                       </div>
@@ -361,15 +503,9 @@ export default function FreightcomRatesWidget({ data }: any) {
               </div>
             )}
 
-            {selectedRate && (
-              <div className="mt-4 rounded-md border border-ui-border-base p-3">
-                <Text size="small" className="text-ui-fg-subtle">Selected (we’ll wire the next steps after)</Text>
-                <Text className="font-medium">
-                  {(selectedRate.carrier_name || "Carrier")} • {(selectedRate.service_name || selectedRate.service_id)}
-                </Text>
-                <Text size="small" className="text-ui-fg-subtle">Total: {moneyLabel(selectedRate.total)}</Text>
-              </div>
-            )}
+            <Text size="xsmall" className="text-ui-fg-subtle mt-6">
+              Next step (creating shipment/label) will be wired after selection.
+            </Text>
           </FocusModal.Body>
         </FocusModal.Content>
       </FocusModal>
