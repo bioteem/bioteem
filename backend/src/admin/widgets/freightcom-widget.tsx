@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { defineWidgetConfig } from "@medusajs/admin-sdk"
 import { Container, Heading, Button, Text, Badge, FocusModal } from "@medusajs/ui"
-import { useMutation } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { sdk } from "../lib/sdk"
 
 type Money = { value: string; currency: string }
@@ -102,20 +102,24 @@ function pickLabelUrlFromShipment(shipment: any): string | null {
   return shipment?.label_url || null
 }
 
-function withTimeout<T>(p: Promise<T>, ms = 20000): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`Timed out after ${ms}ms`)), ms)),
-  ])
-}
-
 export default function FreightcomRatesWidget({ data }: any) {
-  const order = getOrderFromWidgetData(data)
-  const orderId = order?.id as string | undefined
+  const fallbackOrder = getOrderFromWidgetData(data)
+  const orderId = fallbackOrder?.id
+  const qc = useQueryClient()
 
-  // shipment id persisted in order.metadata.freightcom_shipment_id
-  const [persistedShipmentId, setPersistedShipmentId] = useState<string | null>(null)
-  const [isHydratingShipmentId, setIsHydratingShipmentId] = useState(false)
+  // ✅ Always keep a fresh order object (metadata changes show immediately)
+  const orderQuery = useQuery({
+    queryKey: ["admin-order", orderId],
+    enabled: !!orderId,
+    queryFn: async () => sdk.client.fetch<any>(`/admin/orders/${orderId}`),
+    staleTime: 5_000,
+  })
+
+  const order = orderQuery.data?.order ?? fallbackOrder
+
+  // ✅ Single source of truth for shipment id
+  const shipmentIdFromMeta =
+    (order?.metadata?.freightcom_shipment_id as string | undefined) ?? null
 
   // Package defaults
   const [unitSystem, setUnitSystem] = useState<"metric" | "imperial">("metric")
@@ -124,20 +128,25 @@ export default function FreightcomRatesWidget({ data }: any) {
   const [defWCm, setDefWCm] = useState(15)
   const [defHCm, setDefHCm] = useState(10)
 
-  // paging meta
-  const [offsetMeta, setOffsetMeta] = useState<Record<number, { next_offset?: number; rates_total?: number }>>({})
-
+  // Ship date selection
   const [shipDateISO, setShipDateISO] = useState<string>(() => defaultShipDateISO())
 
+  // Rates modal / stepper
   const [isRatesModalOpen, setIsRatesModalOpen] = useState(false)
   const [step, setStep] = useState<1 | 2>(1)
 
+  // Selection
   const [selectedServiceId, setSelectedServiceId] = useState<string | null>(null)
 
+  // Page caching
   const [pages, setPages] = useState<FreightcomRate[][]>([])
   const [cursorOffsets, setCursorOffsets] = useState<number[]>([0])
   const [pageIndex, setPageIndex] = useState(0)
 
+  // per-offset paging meta
+  const [offsetMeta, setOffsetMeta] = useState<Record<number, { next_offset?: number; rates_total?: number }>>({})
+
+  // Response meta
   const [meta, setMeta] = useState<{
     request_id: string | null
     status: "idle" | "processing" | "ready"
@@ -151,18 +160,16 @@ export default function FreightcomRatesWidget({ data }: any) {
   const done = meta.status === "ready"
   const currentRates = pages[pageIndex] || []
 
+  // Payment methods
   const [paymentMethods, setPaymentMethods] = useState<{ id: string; label: string }[]>([])
   const [paymentMethodId, setPaymentMethodId] = useState<string | null>(null)
 
-  // shipment modal state
+  // Shipment modal
   const [isShipmentModalOpen, setIsShipmentModalOpen] = useState(false)
-  const [shipmentId, setShipmentId] = useState<string | null>(null)
-  const [shipmentDetails, setShipmentDetails] = useState<any | null>(null)
-
   const [showPreview, setShowPreview] = useState(false)
   const [showRawShipment, setShowRawShipment] = useState(false)
 
-  // destination preview
+  // Destination preview
   const ship = order?.shipping_address
   const destinationPreview = useMemo(() => {
     return {
@@ -195,32 +202,30 @@ export default function FreightcomRatesWidget({ data }: any) {
     return null
   }, [pages, selectedServiceId])
 
-  // ✅ Hydrate shipment id from admin order (flat key)
-  useEffect(() => {
-    if (!orderId) return
+  // ✅ Shipment details query (prevents reload-stuck)
+  const shipmentQuery = useQuery({
+    queryKey: ["freightcom-shipment", orderId, shipmentIdFromMeta],
+    enabled: !!orderId && !!shipmentIdFromMeta && isShipmentModalOpen,
+    queryFn: async () => {
+      const resp = await sdk.client.fetch<any>(
+        `/admin/orders/${orderId}/freightcom/shipments/${shipmentIdFromMeta}`
+      )
+      return resp?.shipment ?? resp
+    },
+    staleTime: 10_000,
+  })
 
-    const fromData = (order?.metadata?.freightcom_shipment_id as string | undefined) ?? null
-    if (fromData) {
-      setPersistedShipmentId(fromData)
-      return
-    }
+  const shipmentDetails = shipmentQuery.data ?? null
 
-    setIsHydratingShipmentId(true)
-    ;(async () => {
-      try {
-        const resp = await withTimeout(sdk.client.fetch<any>(`/admin/orders/${orderId}`), 20000)
-        const id = (resp?.order?.metadata?.freightcom_shipment_id as string | undefined) ?? null
-        setPersistedShipmentId(id)
-      } catch {
-        setPersistedShipmentId(null)
-      } finally {
-        setIsHydratingShipmentId(false)
-      }
-    })()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orderId])
-
-  const existingShipmentId = (shipmentId ?? persistedShipmentId) as string | null
+  const shipmentSummary = useMemo(() => {
+    const s = shipmentDetails
+    if (!s) return null
+    const tracking_url = s.tracking_url ?? null
+    const tracking_number =
+      s.primary_tracking_number ?? (Array.isArray(s.tracking_numbers) ? s.tracking_numbers?.[0] : null) ?? null
+    const label_url = pickLabelUrlFromShipment(s)
+    return { tracking_url, tracking_number, label_url, state: s.state, id: s.id }
+  }, [shipmentDetails])
 
   const ratesMutation = useMutation({
     mutationFn: async (vars: { offset: number; openModalOnReady?: boolean }) => {
@@ -357,21 +362,6 @@ export default function FreightcomRatesWidget({ data }: any) {
     },
   })
 
-  const fetchShipmentDetails = useMutation({
-    mutationFn: async (vars: { shipment_id: string }) => {
-      if (!orderId) throw new Error("Missing orderId")
-      if (!vars.shipment_id) throw new Error("Missing shipment_id")
-
-      const sid = encodeURIComponent(vars.shipment_id)
-      const resp = await withTimeout(
-        sdk.client.fetch<any>(`/admin/orders/${orderId}/freightcom/shipments/${sid}`),
-        20000
-      )
-      return resp?.shipment ?? resp
-    },
-    onSuccess: (shipment) => setShipmentDetails(shipment),
-  })
-
   const bookShipment = useMutation({
     mutationFn: async () => {
       if (!orderId) throw new Error("Missing orderId")
@@ -397,20 +387,11 @@ export default function FreightcomRatesWidget({ data }: any) {
         },
       })
     },
-    onSuccess: async (r) => {
-      const id = r?.shipment_id
-      if (!id) return
-
-      // instant UI update (no reload needed)
-      setShipmentId(id)
-      setPersistedShipmentId(id)
-
-      // open shipment modal and fetch details fresh
-      setShipmentDetails(null)
+    onSuccess: async () => {
+      // ✅ pull in new metadata immediately
+      await qc.invalidateQueries({ queryKey: ["admin-order", orderId] })
       setShowRawShipment(false)
-      setIsShipmentModalOpen(true)
-
-      await fetchShipmentDetails.mutateAsync({ shipment_id: id })
+      setIsShipmentModalOpen(true) // shipmentQuery will fetch using fresh shipment id
       setIsRatesModalOpen(false)
     },
   })
@@ -418,17 +399,15 @@ export default function FreightcomRatesWidget({ data }: any) {
   const cancelShipment = useMutation({
     mutationFn: async () => {
       if (!orderId) throw new Error("Missing orderId")
-      if (!existingShipmentId) throw new Error("Missing shipmentId")
-
-      const sid = encodeURIComponent(existingShipmentId)
-      return sdk.client.fetch<any>(`/admin/orders/${orderId}/freightcom/shipments/${sid}/cancel`, {
-        method: "POST",
-      })
+      if (!shipmentIdFromMeta) throw new Error("Missing shipmentId")
+      return sdk.client.fetch<any>(
+        `/admin/orders/${orderId}/freightcom/shipments/${shipmentIdFromMeta}/cancel`,
+        { method: "POST" }
+      )
     },
-    onSuccess: () => {
-      setShipmentDetails(null)
-      setShipmentId(null)
-      setPersistedShipmentId(null)
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["admin-order", orderId] })
+      await qc.invalidateQueries({ queryKey: ["freightcom-shipment", orderId, shipmentIdFromMeta] })
       setIsShipmentModalOpen(false)
       resetRateFlow()
     },
@@ -440,22 +419,12 @@ export default function FreightcomRatesWidget({ data }: any) {
     setStep(2)
   }
 
-  const shipmentSummary = useMemo(() => {
-    const s = shipmentDetails
-    if (!s) return null
-    const tracking_url = s.tracking_url ?? null
-    const tracking_number =
-      s.primary_tracking_number ?? (Array.isArray(s.tracking_numbers) ? s.tracking_numbers?.[0] : null) ?? null
-    const label_url = pickLabelUrlFromShipment(s)
-    return { tracking_url, tracking_number, label_url, state: s.state, id: s.id }
-  }, [shipmentDetails])
-
   const anyError =
     (ratesMutation.error as any)?.message ||
     (loadPaymentMethods.error as any)?.message ||
     (bookShipment.error as any)?.message ||
-    (fetchShipmentDetails.error as any)?.message ||
     (cancelShipment.error as any)?.message ||
+    (shipmentQuery.error as any)?.message ||
     null
 
   return (
@@ -485,9 +454,9 @@ export default function FreightcomRatesWidget({ data }: any) {
           <Button
             variant="secondary"
             onClick={() => setIsShipmentModalOpen(true)}
-            disabled={!existingShipmentId || isHydratingShipmentId}
+            disabled={!shipmentIdFromMeta || orderQuery.isPending}
           >
-            {isHydratingShipmentId ? "Loading…" : "View Shipment"}
+            {orderQuery.isPending ? "Loading…" : "View Shipment"}
           </Button>
         </div>
       </div>
@@ -547,7 +516,9 @@ export default function FreightcomRatesWidget({ data }: any) {
             </div>
           </div>
 
-          <Text size="xsmall" className="text-ui-fg-subtle">Package defaults used when variant dims/weight are missing</Text>
+          <Text size="xsmall" className="text-ui-fg-subtle">
+            Package defaults used when variant dims/weight are missing
+          </Text>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
             <div>
@@ -583,12 +554,14 @@ export default function FreightcomRatesWidget({ data }: any) {
             </Text>
           ) : (
             <pre className="text-xs mt-2 p-2 bg-ui-bg-subtle rounded overflow-auto max-h-48">
-              {JSON.stringify(meta.preview, null, 2)}
+{JSON.stringify(meta.preview, null, 2)}
             </pre>
           )}
 
           {requestId && !done && (
-            <Text size="small" className="text-ui-fg-subtle mt-2">Processing… modal will open automatically when ready.</Text>
+            <Text size="small" className="text-ui-fg-subtle mt-2">
+              Processing… modal will open automatically when ready.
+            </Text>
           )}
         </div>
       </div>
@@ -596,17 +569,16 @@ export default function FreightcomRatesWidget({ data }: any) {
       {/* Rates modal */}
       <FocusModal open={isRatesModalOpen} onOpenChange={setIsRatesModalOpen}>
         <FocusModal.Content className="h-[95vh] w-[95vw] max-w-none overflow-hidden">
-<FocusModal.Header>
-  <div className="flex items-center justify-between w-full">
-    <FocusModal.Title>
-      {step === 1 ? "Step 1 — Select Rate" : "Step 2 — Payment + Book"}
-    </FocusModal.Title>
-
-    <FocusModal.Close asChild>
-      <Button size="small" variant="secondary">Close</Button>
-    </FocusModal.Close>
-  </div>
-</FocusModal.Header>
+          <FocusModal.Header>
+            <div className="flex items-center justify-between w-full">
+              <FocusModal.Title>
+                {step === 1 ? "Step 1 — Select Rate" : "Step 2 — Payment + Book"}
+              </FocusModal.Title>
+              <FocusModal.Close asChild>
+                <Button size="small" variant="secondary">Close</Button>
+              </FocusModal.Close>
+            </div>
+          </FocusModal.Header>
 
           <FocusModal.Body className="p-6 overflow-y-auto h-[calc(95vh-64px)]">
             <div className="flex items-center gap-2 mb-4">
@@ -743,52 +715,28 @@ export default function FreightcomRatesWidget({ data }: any) {
       </FocusModal>
 
       {/* Shipment modal */}
-      <FocusModal
-        open={isShipmentModalOpen}
-        onOpenChange={(o) => {
-          setIsShipmentModalOpen(o)
-          if (!o) return
-
-          if (!existingShipmentId) return
-          setShipmentId(existingShipmentId)
-
-          // IMPORTANT: reset mutation + state each open
-          fetchShipmentDetails.reset()
-          setShipmentDetails(null)
-          setShowRawShipment(false)
-
-          fetchShipmentDetails.mutate({ shipment_id: existingShipmentId })
-        }}
-      >
+      <FocusModal open={isShipmentModalOpen} onOpenChange={setIsShipmentModalOpen}>
         <FocusModal.Content className="h-[95vh] w-[95vw] max-w-none overflow-hidden">
-<FocusModal.Header>
-  <div className="flex items-center justify-between w-full">
-    <FocusModal.Title>Shipment</FocusModal.Title>
-
-    <FocusModal.Close asChild>
-      <Button size="small" variant="secondary">Close</Button>
-    </FocusModal.Close>
-  </div>
-</FocusModal.Header>
+          <FocusModal.Header>
+            <div className="flex items-center justify-between w-full">
+              <FocusModal.Title>Shipment</FocusModal.Title>
+              <FocusModal.Close asChild>
+                <Button size="small" variant="secondary">Close</Button>
+              </FocusModal.Close>
+            </div>
+          </FocusModal.Header>
 
           <FocusModal.Body className="p-6 overflow-y-auto h-[calc(95vh-64px)]">
-            {!existingShipmentId ? (
+            {!shipmentIdFromMeta ? (
               <Text size="small" className="text-ui-fg-subtle">No shipment id found yet.</Text>
-            ) : fetchShipmentDetails.isError ? (
-              <div className="space-y-2">
-                <Text size="small" className="text-ui-fg-error">
-                  {String((fetchShipmentDetails.error as any)?.message || "Failed to load shipment")}
-                </Text>
-                <Button
-                  size="small"
-                  variant="secondary"
-                  onClick={() => fetchShipmentDetails.mutate({ shipment_id: existingShipmentId })}
-                >
-                  Retry
-                </Button>
-              </div>
-            ) : fetchShipmentDetails.isPending || !shipmentDetails ? (
+            ) : shipmentQuery.isPending ? (
               <Text size="small" className="text-ui-fg-subtle">Loading shipment details…</Text>
+            ) : shipmentQuery.isError ? (
+              <Text size="small" className="text-ui-fg-error">
+                {String((shipmentQuery.error as any)?.message || "Error")}
+              </Text>
+            ) : !shipmentDetails ? (
+              <Text size="small" className="text-ui-fg-subtle">No shipment details returned.</Text>
             ) : shipmentSummary ? (
               <div className="space-y-3">
                 <div className="rounded-md border border-ui-border-base p-3">
@@ -829,8 +777,8 @@ export default function FreightcomRatesWidget({ data }: any) {
                 <div className="flex items-center gap-2">
                   <Button
                     variant="secondary"
-                    onClick={() => existingShipmentId && fetchShipmentDetails.mutate({ shipment_id: existingShipmentId })}
-                    disabled={fetchShipmentDetails.isPending}
+                    onClick={() => qc.invalidateQueries({ queryKey: ["freightcom-shipment", orderId, shipmentIdFromMeta] })}
+                    disabled={shipmentQuery.isPending}
                   >
                     Refresh
                   </Button>
@@ -854,7 +802,7 @@ export default function FreightcomRatesWidget({ data }: any) {
 
                   {!showRawShipment ? null : (
                     <pre className="text-xs mt-2 p-2 bg-ui-bg-subtle rounded overflow-auto max-h-96">
-                      {JSON.stringify(shipmentDetails, null, 2)}
+{JSON.stringify(shipmentDetails, null, 2)}
                     </pre>
                   )}
                 </div>

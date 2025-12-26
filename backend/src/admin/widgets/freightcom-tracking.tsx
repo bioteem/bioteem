@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { defineWidgetConfig } from "@medusajs/admin-sdk"
 import { Container, Heading, Button, Text, Badge } from "@medusajs/ui"
-import { useMutation } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { sdk } from "../lib/sdk"
 
 type TrackingEvent = {
@@ -18,33 +18,64 @@ function getOrderFromWidgetData(data: any) {
 }
 
 export default function FreightcomTrackingUpdatesWidget({ data }: any) {
-  const order = getOrderFromWidgetData(data)
-  const orderId = order?.id
-  const shipmentId = order?.metadata?.freightcom_shipment_id as string | undefined
+  const fallbackOrder = getOrderFromWidgetData(data)
+  const orderId = fallbackOrder?.id
+  const qc = useQueryClient()
+
+  // ✅ Always use fresh order so shipment id is never stale
+  const orderQuery = useQuery({
+    queryKey: ["admin-order", orderId],
+    enabled: !!orderId,
+    queryFn: async () => sdk.client.fetch<any>(`/admin/orders/${orderId}`),
+    staleTime: 5_000,
+  })
+
+  const liveOrder = orderQuery.data?.order ?? fallbackOrder
+  const shipmentId = (liveOrder?.metadata?.freightcom_shipment_id as string | undefined) ?? null
+
   const [events, setEvents] = useState<TrackingEvent[]>([])
 
   const fetchEvents = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (vars: { shipmentId: string }) => {
       if (!orderId) throw new Error("Missing orderId")
-      if (!shipmentId) throw new Error("No Freightcom shipment on this order yet.")
+      if (!vars.shipmentId) throw new Error("No Freightcom shipment on this order yet.")
       return sdk.client.fetch<TrackingEventsResp>(
-        `/admin/orders/${orderId}/freightcom/shipments/${shipmentId}/tracking-events`
+        `/admin/orders/${orderId}/freightcom/shipments/${vars.shipmentId}/tracking-events`
       )
     },
     onSuccess: (resp) => setEvents(resp?.events || []),
   })
 
+  // ✅ Auto-load when shipment id exists/changes
   useEffect(() => {
     if (!orderId || !shipmentId) return
-    fetchEvents.mutate()
+    fetchEvents.mutate({ shipmentId })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orderId, shipmentId])
 
   const statusBadge = useMemo(() => {
     if (!shipmentId) return <Badge size="small" color="grey">No shipment</Badge>
-    if (fetchEvents.isPending) return <Badge size="small" color="orange">Loading</Badge>
+    if (fetchEvents.isPending || orderQuery.isPending) return <Badge size="small" color="orange">Loading</Badge>
     return <Badge size="small" color="green">Ready</Badge>
-  }, [shipmentId, fetchEvents.isPending])
+  }, [shipmentId, fetchEvents.isPending, orderQuery.isPending])
+
+  const onRefresh = async () => {
+    if (!orderId) return
+    // ✅ force fresh metadata FIRST, then use the newest shipment id
+    const fresh = await qc.fetchQuery({
+      queryKey: ["admin-order", orderId],
+      queryFn: async () => sdk.client.fetch<any>(`/admin/orders/${orderId}`),
+    })
+    const freshShipmentId =
+      (fresh?.order?.metadata?.freightcom_shipment_id as string | undefined) ?? null
+
+    if (!freshShipmentId) {
+      setEvents([])
+      return
+    }
+
+    fetchEvents.mutate({ shipmentId: freshShipmentId })
+  }
 
   return (
     <Container className="p-0">
@@ -61,8 +92,8 @@ export default function FreightcomTrackingUpdatesWidget({ data }: any) {
 
         <Button
           variant="secondary"
-          onClick={() => fetchEvents.mutate()}
-          disabled={!shipmentId || fetchEvents.isPending}
+          onClick={onRefresh}
+          disabled={!orderId || !shipmentId || fetchEvents.isPending || orderQuery.isPending}
         >
           {fetchEvents.isPending ? "Refreshing…" : "Refresh"}
         </Button>
