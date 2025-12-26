@@ -10,6 +10,20 @@ function requireEnv(name: string) {
   if (!v) throw new Error(`Missing env: ${name}`)
   return v
 }
+function normalizePhone(raw?: string | null) {
+  const digits = String(raw || "").replace(/\D/g, "")
+  return digits.length >= 10 ? digits.slice(-15) : null
+}
+
+function requireDestinationPhone(order: any) {
+  const fromShipping = normalizePhone(order?.shipping_address?.phone)
+  if (fromShipping) return fromShipping
+
+  const fromCustomer = normalizePhone(order?.customer?.phone)
+  if (fromCustomer) return fromCustomer
+
+  return null
+}
 
 function getExpectedShipDate() {
   const d = new Date()
@@ -204,25 +218,30 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
 
     const { data } = await query.graph({
       entity: "order",
-      fields: [
-        "id",
-        "email",
-        "shipping_address.first_name",
-        "shipping_address.last_name",
-        "shipping_address.address_1",
-        "shipping_address.address_2",
-        "shipping_address.city",
-        "shipping_address.province",
-        "shipping_address.country_code",
-        "shipping_address.postal_code",
-        "shipping_address.company",
-        "items.title",
-        "items.quantity",
-        "items.variant.weight",
-        "items.variant.length",
-        "items.variant.width",
-        "items.variant.height",
-      ],
+    fields: [
+  "id",
+  "email",
+
+  "customer.phone",
+
+  "shipping_address.phone",
+  "shipping_address.first_name",
+  "shipping_address.last_name",
+  "shipping_address.address_1",
+  "shipping_address.address_2",
+  "shipping_address.city",
+  "shipping_address.province",
+  "shipping_address.country_code",
+  "shipping_address.postal_code",
+  "shipping_address.company",
+
+  "items.title",
+  "items.quantity",
+  "items.variant.weight",
+  "items.variant.length",
+  "items.variant.width",
+  "items.variant.height",
+],
       filters: { id: orderId },
     })
 
@@ -233,7 +252,15 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     if (!ship?.postal_code || !ship?.country_code) {
       return res.status(400).json({ message: "Order shipping address missing postal code / country." })
     }
+const destinationPhone = requireDestinationPhone(order)
 
+if (!destinationPhone) {
+  return res.status(400).json({
+    message:
+      "Customer phone number is required to book shipment. Please add a phone number to the customer or shipping address.",
+    code: "DESTINATION_PHONE_REQUIRED",
+  })
+}
     const origin = {
       name: "Warehouse",
       address: {
@@ -253,21 +280,24 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       receives_email_updates: false,
     }
 
-    const destination = {
-      name: `${ship.first_name || ""} ${ship.last_name || ""}`.trim() || "Customer",
-      address: {
-        address_line_1: ship.address_1 || "",
-        address_line_2: ship.address_2 || "",
-        unit_number: ship.company || "",
-        city: ship.city || "",
-        region: ship.province || "",
-        country: (ship.country_code || "").toUpperCase(),
-        postal_code: ship.postal_code || "",
-      },
-      residential: true,
-      email_addresses: order.email ? [order.email] : [],
-      receives_email_updates: true,
-    }
+const destination = {
+  name: `${ship.first_name || ""} ${ship.last_name || ""}`.trim() || "Customer",
+  address: {
+    address_line_1: ship.address_1 || "",
+    address_line_2: ship.address_2 || "",
+    unit_number: ship.company || "",
+    city: ship.city || "",
+    region: ship.province || "",
+    country: (ship.country_code || "").toUpperCase(),
+    postal_code: ship.postal_code || "",
+  },
+  phone_number: {
+    number: destinationPhone,
+  },
+  residential: true,
+  email_addresses: order.email ? [order.email] : [],
+  receives_email_updates: true,
+}
 
     const expected_ship_date = body.expected_ship_date_override ?? getExpectedShipDate()
     const { packages, debug, defaults } = buildFreightcomPackages(order, body.package_overrides)

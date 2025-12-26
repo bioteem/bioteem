@@ -8,7 +8,20 @@ function requireEnv(name: string) {
   if (!v) throw new Error(`Missing env: ${name}`)
   return v
 }
+function normalizePhone(raw?: string | null) {
+  const digits = String(raw || "").replace(/\D/g, "")
+  return digits.length >= 10 ? digits.slice(-15) : null
+}
 
+function requireDestinationPhone(order: any) {
+  const fromShipping = normalizePhone(order?.shipping_address?.phone)
+  if (fromShipping) return fromShipping
+
+  const fromCustomer = normalizePhone(order?.customer?.phone)
+  if (fromCustomer) return fromCustomer
+
+  return null
+}
 async function freightcomRequest(path: string, opts?: { method?: string; body?: any }) {
   const base = requireEnv("FREIGHTCOM_API_BASE_URL")
   const key = requireEnv("FREIGHTCOM_API_KEY")
@@ -161,31 +174,44 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     const query = req.scope.resolve<Query>("query")
     const { data } = await query.graph({
       entity: "order",
-      fields: [
-        "id",
-        "email",
-        "shipping_address.first_name",
-        "shipping_address.last_name",
-        "shipping_address.address_1",
-        "shipping_address.address_2",
-        "shipping_address.city",
-        "shipping_address.province",
-        "shipping_address.country_code",
-        "shipping_address.postal_code",
-        "shipping_address.company",
-        "items.title",
-        "items.quantity",
-        "items.variant.weight",
-        "items.variant.length",
-        "items.variant.width",
-        "items.variant.height",
-      ],
+fields: [
+  "id",
+  "email",
+
+  "customer.phone",
+
+  "shipping_address.phone",
+  "shipping_address.first_name",
+  "shipping_address.last_name",
+  "shipping_address.address_1",
+  "shipping_address.address_2",
+  "shipping_address.city",
+  "shipping_address.province",
+  "shipping_address.country_code",
+  "shipping_address.postal_code",
+  "shipping_address.company",
+
+  "items.title",
+  "items.quantity",
+  "items.variant.weight",
+  "items.variant.length",
+  "items.variant.width",
+  "items.variant.height",
+],
       filters: { id: orderId },
     })
 
     const order = data?.[0]
     if (!order) return res.status(404).json({ message: "Order not found" })
+const destinationPhone = requireDestinationPhone(order)
 
+if (!destinationPhone) {
+  return res.status(400).json({
+    message:
+      "Customer phone number is required to book shipment. Please add a phone number to the customer or shipping address.",
+    code: "DESTINATION_PHONE_REQUIRED",
+  })
+}
     const ship = order.shipping_address
     if (!ship?.postal_code || !ship?.country_code) {
       return res.status(400).json({ message: "Order shipping address missing postal code / country." })
@@ -210,21 +236,24 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       receives_email_updates: true,
     }
 
-    const destination = {
-      name: `${ship.first_name || ""} ${ship.last_name || ""}`.trim() || "Customer",
-      address: {
-        address_line_1: ship.address_1 || "",
-        address_line_2: ship.address_2 || "",
-        unit_number: ship.company || "",
-        city: ship.city || "",
-        region: ship.province || "",
-        country: (ship.country_code || "").toUpperCase(),
-        postal_code: ship.postal_code || "",
-      },
-      residential: true,
-      email_addresses: order.email ? [order.email] : [],
-      receives_email_updates: true,
-    }
+const destination = {
+  name: `${ship.first_name || ""} ${ship.last_name || ""}`.trim() || "Customer",
+  address: {
+    address_line_1: ship.address_1 || "",
+    address_line_2: ship.address_2 || "",
+    unit_number: ship.company || "",
+    city: ship.city || "",
+    region: ship.province || "",
+    country: (ship.country_code || "").toUpperCase(),
+    postal_code: ship.postal_code || "",
+  },
+  phone_number: {
+    number: destinationPhone,
+  },
+  residential: true,
+  email_addresses: order.email ? [order.email] : [],
+  receives_email_updates: true,
+}
 
     const packages = buildPackages(order, package_overrides)
 
