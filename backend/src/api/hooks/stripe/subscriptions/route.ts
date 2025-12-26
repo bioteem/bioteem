@@ -21,8 +21,6 @@ const SUBSCRIPTIONS_SHIPPING_OPTION_ID =
 const SUBSCRIPTIONS_PAYMENT_PROVIDER_ID =
   process.env.SUBSCRIPTIONS_PAYMENT_PROVIDER_ID || "pp_system_default"
 
-
-  
 type AnyObj = Record<string, any>
 
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
@@ -96,53 +94,83 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     email: string
     name: string
     stripeCustomerId: string
+    phone?: string | null
+    shipping?: {
+      name?: string | null
+      phone?: string | null
+      address?: {
+        line1?: string | null
+        line2?: string | null
+        city?: string | null
+        state?: string | null
+        postal_code?: string | null
+        country?: string | null
+      } | null
+    } | null
   }) => {
-    const { email, name, stripeCustomerId } = opts
+    const { email, name, stripeCustomerId, phone, shipping } = opts
 
     const [existingCustomer] = await customerModuleService.listCustomers({
       email,
     })
 
-    let medusaCustomer = existingCustomer
+    const [first_name, ...rest] = (name || "").split(" ")
+    const last_name = rest.join(" ") || null
 
-    if (!medusaCustomer) {
-      const [first_name, ...rest] = (name || "").split(" ")
-      const last_name = rest.join(" ") || null
+    const addr = shipping?.address ?? null
+    const resolvedPhone = phone ?? shipping?.phone ?? null
 
-      medusaCustomer = await customerModuleService.createCustomers({
+    // Store shipping snapshot on customer metadata (reliable + easy to inspect)
+    const shippingSnapshot = {
+      stripe_customer_id: stripeCustomerId,
+
+      phone: resolvedPhone,
+      shipping_name: shipping?.name ?? null,
+      shipping_phone: shipping?.phone ?? null,
+      shipping_address_line1: addr?.line1 ?? null,
+      shipping_address_line2: addr?.line2 ?? null,
+      shipping_city: addr?.city ?? null,
+      shipping_province: addr?.state ?? null,
+      shipping_postal_code: addr?.postal_code ?? null,
+      shipping_country: addr?.country ?? null,
+    }
+
+    if (!existingCustomer) {
+      const created = await customerModuleService.createCustomers({
         email,
         first_name: first_name || null,
         last_name,
-        metadata: {
-          stripe_customer_id: stripeCustomerId,
-        },
+        phone: resolvedPhone ?? undefined,
+        metadata: shippingSnapshot,
       })
 
-      console.log(
-        "[subscriptions] Created Medusa customer",
-        medusaCustomer.id,
-        email
-      )
-    } else {
-      const metadata = (medusaCustomer.metadata || {}) as Record<string, unknown>
-      if (!metadata.stripe_customer_id) {
-        await customerModuleService.updateCustomers(
-          { id: medusaCustomer.id },
-          {
-            metadata: {
-              ...metadata,
-              stripe_customer_id: stripeCustomerId,
-            },
-          }
-        )
-        console.log(
-          "[subscriptions] Attached stripe_customer_id to existing customer",
-          medusaCustomer.id
-        )
-      }
+      console.log("[subscriptions] Created Medusa customer", created.id, email)
+      return created
     }
 
-    return medusaCustomer
+    const existingMd = (existingCustomer.metadata || {}) as Record<string, any>
+
+    await customerModuleService.updateCustomers(
+      { id: existingCustomer.id },
+      {
+        phone: resolvedPhone ?? existingCustomer.phone ?? undefined,
+        metadata: {
+          ...existingMd,
+          ...shippingSnapshot,
+          // preserve any existing metadata keys not overwritten
+          stripe_customer_id: existingMd.stripe_customer_id ?? stripeCustomerId,
+        },
+      }
+    )
+
+    console.log("[subscriptions] Updated Medusa customer metadata/phone", existingCustomer.id)
+
+    // return a refreshed record (optional)
+    const [updated] = await customerModuleService.listCustomers({
+      id: existingCustomer.id,
+    } as any)
+
+    return updated || existingCustomer
   }
 
   const upsertSubscriptionFromStripeSub = async (stripeSub: AnyObj) => {
@@ -154,13 +182,15 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       return null
     }
 
-    // Resolve customer details from Stripe (email/name/shipping)
+    // Resolve customer details from Stripe (email/name/shipping/phone)
     const stripeCustomer = (await stripe.customers.retrieve(
       stripeCustomerId
     )) as AnyObj
 
     const email = (stripeCustomer.email as string | null) ?? null
     const name = (stripeCustomer.name as string) || ""
+    const phone = (stripeCustomer.phone as string | null) ?? null
+
     const shippingDetails = stripeCustomer.shipping || null
     const addr = shippingDetails?.address || null
 
@@ -173,11 +203,16 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       email,
       name,
       stripeCustomerId,
+      phone,
+      shipping: shippingDetails,
     })
 
     const priceId = getFirstPriceIdFromStripeSub(stripeSub)
     if (!priceId) {
-      console.warn("[subscriptions] Missing price id on Stripe subscription", stripeSubId)
+      console.warn(
+        "[subscriptions] Missing price id on Stripe subscription",
+        stripeSubId
+      )
       return null
     }
 
@@ -186,7 +221,10 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     })
 
     if (!plan) {
-      console.warn("[subscriptions] No SubscriptionPlan found for stripe_price_id", priceId)
+      console.warn(
+        "[subscriptions] No SubscriptionPlan found for stripe_price_id",
+        priceId
+      )
       return null
     }
 
@@ -199,7 +237,8 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       plan_id: plan.id,
       stripe_customer_id: stripeCustomerId,
       stripe_subscription_id: stripeSubId,
-      stripe_latest_invoice_id: (stripeSub.latest_invoice as string | null) ?? null,
+      stripe_latest_invoice_id:
+        (stripeSub.latest_invoice as string | null) ?? null,
       status: stripeSub.status as any,
       current_period_start: stripeSub.current_period_start
         ? new Date(stripeSub.current_period_start * 1000)
@@ -227,7 +266,12 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         last_order_created_at: null,
       })
 
-      console.log("[subscriptions] Created subscription", created.id, "plan", plan.id)
+      console.log(
+        "[subscriptions] Created subscription",
+        created.id,
+        "plan",
+        plan.id
+      )
       return created
     }
 
@@ -250,7 +294,6 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       stripeSub.status
     )
 
-    // Return the refreshed record (optional)
     const [updated] = await subscriptionModuleService.listSubscriptions({
       id: existingSub.id,
     })
@@ -319,8 +362,10 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
 
         const customerDetails = session.customer_details
         const shippingDetails = (session as any).shipping_details
+
         const email = customerDetails?.email
         const name = customerDetails?.name || ""
+        const phone = (customerDetails as any)?.phone ?? null
 
         if (!email) {
           console.warn(
@@ -329,12 +374,19 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           break
         }
 
-        await ensureMedusaCustomer({ email, name, stripeCustomerId })
+        await ensureMedusaCustomer({
+          email,
+          name,
+          stripeCustomerId,
+          phone,
+          shipping: shippingDetails ?? null,
+        })
 
-        const stripeSub = (await stripe.subscriptions.retrieve(stripeSubId)) as AnyObj
-        // Create if missing / update if exists (handles idempotency + correct plan)
+        const stripeSub = (await stripe.subscriptions.retrieve(
+          stripeSubId
+        )) as AnyObj
+
         await upsertSubscriptionFromStripeSub(stripeSub)
-
         break
       }
 
@@ -343,13 +395,12 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       //
       case "customer.subscription.created": {
         const stripeSub = event.data.object as AnyObj
-        // Create/update based on Stripe subscription payload
         await upsertSubscriptionFromStripeSub(stripeSub)
         break
       }
 
       //
-      // 3) KEEP IN SYNC: customer.subscription.updated (plan changes, status changes, etc.)
+      // 3) KEEP IN SYNC: customer.subscription.updated
       //
       case "customer.subscription.updated": {
         const stripeSub = event.data.object as AnyObj
@@ -380,7 +431,9 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           { id: sub.id },
           {
             status: "canceled" as any,
-            stripe_latest_invoice_id: (stripeSub.latest_invoice as string | null) ?? sub.stripe_latest_invoice_id,
+            stripe_latest_invoice_id:
+              (stripeSub.latest_invoice as string | null) ??
+              sub.stripe_latest_invoice_id,
             current_period_start: stripeSub.current_period_start
               ? new Date(stripeSub.current_period_start * 1000)
               : sub.current_period_start,
@@ -396,10 +449,6 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
 
       //
       // 5) INVOICE PAYMENT SUCCEEDED → create order via cart workflow
-      //    Handles:
-      //      - subscription_create
-      //      - subscription_cycle
-      //      - subscription_update  (plan upgrades/downgrades that charge)
       //
       case "invoice.payment_succeeded": {
         const invoiceAny = event.data.object as AnyObj
@@ -422,13 +471,17 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
           break
         }
 
-        // Ensure our subscription row is in sync with Stripe (important for plan changes)
+        // Ensure our subscription row is in sync with Stripe
         let stripeSub: AnyObj | null = null
         try {
           stripeSub = (await stripe.subscriptions.retrieve(stripeSubId)) as AnyObj
           await upsertSubscriptionFromStripeSub(stripeSub)
         } catch (e) {
-          console.warn("[subscriptions] Could not refresh Stripe subscription during invoice", stripeSubId, e)
+          console.warn(
+            "[subscriptions] Could not refresh Stripe subscription during invoice",
+            stripeSubId,
+            e
+          )
         }
 
         const [sub] = await subscriptionModuleService.listSubscriptions({
@@ -472,35 +525,44 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         })
 
         if (!plan) {
-          console.warn("[subscriptions] Subscription has no plan for plan_id", planIdToUse)
+          console.warn(
+            "[subscriptions] Subscription has no plan for plan_id",
+            planIdToUse
+          )
           break
         }
 
- const firstLine = invoiceAny.lines?.data?.[0]
-const period = firstLine?.period
 
-const qty = (firstLine?.quantity ?? 1) as number
+        const currency = String(invoiceAny.currency || "").toLowerCase()
 
-// Prefer the line's amount (already in cents). This matches what Stripe actually charged for the line.
-const lineAmountCents: number | null =
+      const firstLine = invoiceAny.lines?.data?.[0]
+const qty = Number(firstLine?.quantity ?? 1)
+        const period = firstLine?.period
+
+// Stripe gives cents for USD/CAD
+const lineAmountCents =
   typeof firstLine?.amount === "number"
     ? firstLine.amount
-    : typeof firstLine?.subtotal === "number"
-      ? firstLine.subtotal
-      : typeof firstLine?.price?.unit_amount === "number"
-        ? firstLine.price.unit_amount * qty
-        : typeof invoiceAny.amount_paid === "number"
-          ? invoiceAny.amount_paid
-          : null
+    : typeof invoiceAny.amount_paid === "number"
+      ? invoiceAny.amount_paid
+      : null
 
 if (lineAmountCents == null) {
-  console.warn("[subscriptions] Could not determine Stripe line amount (cents) for invoice", invoiceAny.id)
+  console.warn("[subscriptions] Missing Stripe amount", invoiceAny.id)
   break
 }
 
-// Unit price in cents (Medusa expects minor units)
-const unitPriceCents = Math.round(lineAmountCents / qty)
-        const currency = (invoiceAny.currency as string).toLowerCase()
+// ✅ dollars
+const unitPriceMajor = (lineAmountCents / qty) / 100
+
+        // Best-effort shipping phone fallback chain
+        const invoicePhone: string | null =
+          (invoiceAny.customer_phone as string | null) ??
+          (invoiceAny.customer_shipping?.phone as string | null) ??
+          null
+
+        const shippingPhone: string | null =
+          sub.shipping_phone ?? invoicePhone ?? null
 
         let createdOrder: AnyObj | null = null
 
@@ -510,7 +572,6 @@ const unitPriceCents = Math.round(lineAmountCents / qty)
           const cartModule = req.scope.resolve<any>(Modules.CART)
           const orderModule = req.scope.resolve<any>(Modules.ORDER)
 
-          // Import core flows at runtime to avoid circular deps
           const coreFlows = await import("@medusajs/medusa/core-flows")
           const { addToCartWorkflow } = coreFlows
           const { createPaymentCollectionForCartWorkflow } = coreFlows
@@ -523,11 +584,7 @@ const unitPriceCents = Math.round(lineAmountCents / qty)
             relations: ["variants"],
           })
 
-          if (
-            !product ||
-            !Array.isArray(product.variants) ||
-            !product.variants.length
-          ) {
+          if (!product || !Array.isArray(product.variants) || !product.variants.length) {
             throw new Error(
               `Product ${plan.product_id} has no variants – cannot create cart`
             )
@@ -536,7 +593,7 @@ const unitPriceCents = Math.round(lineAmountCents / qty)
           const variantId: string = product.variants[0].id
           const salesChannelId: string | undefined = SUBSCRIPTIONS_SALES_CHANNEL_ID
 
-          // 2) Resolve region (by shipping country, fallback to env, then first region)
+          // 2) Resolve region
           const countryCode = normalizeCountryCode2(sub.shipping_country)
 
           let regionId: string | undefined = undefined
@@ -588,7 +645,7 @@ const unitPriceCents = Math.round(lineAmountCents / qty)
             shipping_address: {
               first_name: sub.shipping_name ?? "Subscriber",
               last_name: undefined,
-              phone: sub.shipping_phone ?? undefined,
+              phone: shippingPhone ?? undefined, // ✅ ensure phone on shipping address
               address_1: sub.shipping_address_line1 ?? undefined,
               address_2: sub.shipping_address_line2 ?? undefined,
               city: sub.shipping_city ?? undefined,
@@ -598,7 +655,6 @@ const unitPriceCents = Math.round(lineAmountCents / qty)
             },
 
             metadata: {
-              // ✅ used by frontend filter
               source: "subscription",
               is_subscription_order: true,
 
@@ -607,38 +663,53 @@ const unitPriceCents = Math.round(lineAmountCents / qty)
               stripe_invoice_id: invoiceAny.id,
               stripe_customer_id: sub.stripe_customer_id,
               subscription_plan_name: plan.name,
-              stripe_unit_price: unitPriceCents,
+
+              pricing_source: "stripe_invoice",
+              stripe_unit_price_major: unitPriceMajor,
+              currency,
             },
           }
 
           const cart = await cartModule.createCarts(cartInput)
 
-          console.log("[subscriptions] Created cart", cart.id, "for subscription", sub.id)
+          console.log(
+            "[subscriptions] Created cart",
+            cart.id,
+            "for subscription",
+            sub.id
+          )
 
-          // 4) Add subscription line item
-await addToCartWorkflow(req.scope).run({
-  input: {
-    cart_id: cart.id,
-    items: [
-      {
-        variant_id: variantId,
-        quantity: qty,
-        unit_price: unitPriceCents, // ✅ custom price reflected in Medusa order totals
-        metadata: {
-          pricing_source: "stripe_invoice",
-          stripe_invoice_id: invoiceAny.id,
-          stripe_subscription_id: stripeSubId,
-          stripe_line_amount_cents: lineAmountCents,
-          stripe_unit_price_cents: unitPriceCents,
-        },
-      },
-    ],
-  },
-})
+          // 4) Add subscription line item WITH CUSTOM PRICE (MAJOR UNITS)
+          await addToCartWorkflow(req.scope).run({
+            input: {
+              cart_id: cart.id,
+              items: [
+                {
+                  variant_id: variantId,
+                  quantity: qty,
+                  unit_price: unitPriceMajor, // ✅ MAJOR units (per your requirement)
+                  metadata: {
+                    pricing_source: "stripe_invoice",
+                    stripe_invoice_id: invoiceAny.id,
+                    stripe_subscription_id: stripeSubId,
+                    stripe_unit_price_major: unitPriceMajor,
+                    currency,
+                  },
+                },
+              ],
+            },
+          })
 
-          console.log("[subscriptions] Added variant to cart", variantId, "cart", cart.id)
+          console.log(
+            "[subscriptions] Added variant to cart",
+            variantId,
+            "cart",
+            cart.id,
+            "unit_price_major",
+            unitPriceMajor
+          )
 
-          // 4b) Attach shipping method (required for shippable items)
+          // 4b) Attach shipping method
           if (SUBSCRIPTIONS_SHIPPING_OPTION_ID) {
             await addShippingMethodToCartWorkflow(req.scope).run({
               input: {
@@ -673,7 +744,10 @@ await addToCartWorkflow(req.scope).run({
             },
           })
 
-          console.log("[subscriptions] Created payment collection + session for cart", cart.id)
+          console.log(
+            "[subscriptions] Created payment collection + session for cart",
+            cart.id
+          )
 
           // 6) Complete cart → creates order
           const { result: completed } = await completeCartWorkflow(req.scope).run({
@@ -691,7 +765,7 @@ await addToCartWorkflow(req.scope).run({
             invoiceAny.id
           )
 
-          // ✅ Force-tag the order (guarantees it exists even if cart->order metadata differs)
+          // ✅ Force-tag the order
           await tagOrderAsSubscription({
             orderModule,
             order: createdOrder,
@@ -716,7 +790,6 @@ await addToCartWorkflow(req.scope).run({
           {
             stripe_latest_invoice_id: invoiceAny.id,
             status: "active" as any,
-            // if plan changed, store it
             plan_id: plan.id,
             current_period_start: period
               ? new Date(period.start * 1000)
@@ -725,9 +798,7 @@ await addToCartWorkflow(req.scope).run({
               ? new Date(period.end * 1000)
               : sub.current_period_end,
             last_order_id: createdOrder?.id ?? sub.last_order_id,
-            last_order_created_at: createdOrder
-              ? new Date()
-              : sub.last_order_created_at,
+            last_order_created_at: createdOrder ? new Date() : sub.last_order_created_at,
           }
         )
 
@@ -735,7 +806,7 @@ await addToCartWorkflow(req.scope).run({
       }
 
       //
-      // 6) INVOICE PAYMENT FAILED → mark subscription as past_due (or whatever you prefer)
+      // 6) INVOICE PAYMENT FAILED
       //
       case "invoice.payment_failed": {
         const invoiceAny = event.data.object as AnyObj
@@ -767,8 +838,6 @@ await addToCartWorkflow(req.scope).run({
     }
   } catch (e) {
     console.error("[subscriptions] Unhandled webhook processing error", event.type, e)
-    // Still return 200 to Stripe only if you truly want to swallow errors.
-    // Usually better to return 500 so Stripe retries.
     return res.status(500).json({ received: true, error: "webhook_failed" })
   }
 

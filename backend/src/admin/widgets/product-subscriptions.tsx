@@ -48,7 +48,7 @@ const ProductSubscriptionsWidget = ({
   const [stripePriceId, setStripePriceId] = useState("")
   const [paymentLinkUrl, setPaymentLinkUrl] = useState("")
   const [priceAmount, setPriceAmount] = useState("") // e.g. "29.99"
-  const [priceCurrency, setPriceCurrency] = useState("usd")
+  const [priceCurrency, setPriceCurrency] = useState("cad")
 
   // Local plans state so we can animate/remove instantly
   const [plans, setPlans] = useState<SubscriptionPlan[]>([])
@@ -100,7 +100,7 @@ const ProductSubscriptionsWidget = ({
       setInterval("month")
       setIntervalCount(1)
       setPriceAmount("")
-      setPriceCurrency("usd")
+      setPriceCurrency("cad")
     },
   })
 
@@ -307,7 +307,7 @@ const ProductSubscriptionsWidget = ({
             onChange={(e) => setPriceAmount(e.target.value)}
           />
           <Input
-            placeholder="usd"
+            placeholder="cad"
             value={priceCurrency}
             onChange={(e) => setPriceCurrency(e.target.value)}
           />
