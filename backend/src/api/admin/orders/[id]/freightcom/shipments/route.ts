@@ -231,6 +231,7 @@ if (!destinationPhone) {
         phone_number:{
             number:"9023064110"
         },
+                contact_name:"Bioteem Warehouse",
       residential: true,
       email_addresses: [process.env.WAREHOUSE_EMAIL || "sales@bioteem40.ca"],
       receives_email_updates: true,
