@@ -102,11 +102,18 @@ function pickLabelUrlFromShipment(shipment: any): string | null {
   return shipment?.label_url || null
 }
 
+function withTimeout<T>(p: Promise<T>, ms = 20000): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`Timed out after ${ms}ms`)), ms)),
+  ])
+}
+
 export default function FreightcomRatesWidget({ data }: any) {
   const order = getOrderFromWidgetData(data)
-  const orderId = order?.id
+  const orderId = order?.id as string | undefined
 
-  // ✅ shipment id that survives page reloads (fetched from API)
+  // shipment id persisted in order.metadata.freightcom_shipment_id
   const [persistedShipmentId, setPersistedShipmentId] = useState<string | null>(null)
   const [isHydratingShipmentId, setIsHydratingShipmentId] = useState(false)
 
@@ -117,25 +124,20 @@ export default function FreightcomRatesWidget({ data }: any) {
   const [defWCm, setDefWCm] = useState(15)
   const [defHCm, setDefHCm] = useState(10)
 
-  // per-offset paging meta
+  // paging meta
   const [offsetMeta, setOffsetMeta] = useState<Record<number, { next_offset?: number; rates_total?: number }>>({})
 
-  // Ship date selection
   const [shipDateISO, setShipDateISO] = useState<string>(() => defaultShipDateISO())
 
-  // Rates modal / stepper
   const [isRatesModalOpen, setIsRatesModalOpen] = useState(false)
   const [step, setStep] = useState<1 | 2>(1)
 
-  // Selection
   const [selectedServiceId, setSelectedServiceId] = useState<string | null>(null)
 
-  // Page caching
   const [pages, setPages] = useState<FreightcomRate[][]>([])
   const [cursorOffsets, setCursorOffsets] = useState<number[]>([0])
   const [pageIndex, setPageIndex] = useState(0)
 
-  // Response meta
   const [meta, setMeta] = useState<{
     request_id: string | null
     status: "idle" | "processing" | "ready"
@@ -149,20 +151,18 @@ export default function FreightcomRatesWidget({ data }: any) {
   const done = meta.status === "ready"
   const currentRates = pages[pageIndex] || []
 
-  // Payment methods
   const [paymentMethods, setPaymentMethods] = useState<{ id: string; label: string }[]>([])
   const [paymentMethodId, setPaymentMethodId] = useState<string | null>(null)
 
-  // Shipment modal + details
+  // shipment modal state
   const [isShipmentModalOpen, setIsShipmentModalOpen] = useState(false)
   const [shipmentId, setShipmentId] = useState<string | null>(null)
   const [shipmentDetails, setShipmentDetails] = useState<any | null>(null)
 
-  // Clean UI toggles
   const [showPreview, setShowPreview] = useState(false)
   const [showRawShipment, setShowRawShipment] = useState(false)
 
-  // Destination preview
+  // destination preview
   const ship = order?.shipping_address
   const destinationPreview = useMemo(() => {
     return {
@@ -195,11 +195,10 @@ export default function FreightcomRatesWidget({ data }: any) {
     return null
   }, [pages, selectedServiceId])
 
-  // ✅ Hydrate shipment id from the Admin API (fixes reload -> "no shipment found")
+  // ✅ Hydrate shipment id from admin order (flat key)
   useEffect(() => {
     if (!orderId) return
 
-    // try widget data first
     const fromData = (order?.metadata?.freightcom_shipment_id as string | undefined) ?? null
     if (fromData) {
       setPersistedShipmentId(fromData)
@@ -209,9 +208,9 @@ export default function FreightcomRatesWidget({ data }: any) {
     setIsHydratingShipmentId(true)
     ;(async () => {
       try {
-        const resp = await sdk.client.fetch<any>(`/admin/orders/${orderId}`)
-const id = (resp?.order?.metadata?.freightcom_shipment_id as string | undefined) ?? null
-setPersistedShipmentId(id)
+        const resp = await withTimeout(sdk.client.fetch<any>(`/admin/orders/${orderId}`), 20000)
+        const id = (resp?.order?.metadata?.freightcom_shipment_id as string | undefined) ?? null
+        setPersistedShipmentId(id)
       } catch {
         setPersistedShipmentId(null)
       } finally {
@@ -221,7 +220,6 @@ setPersistedShipmentId(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orderId])
 
-  // prefer in-memory shipmentId (from booking) else persisted (from API)
   const existingShipmentId = (shipmentId ?? persistedShipmentId) as string | null
 
   const ratesMutation = useMutation({
@@ -362,12 +360,16 @@ setPersistedShipmentId(id)
   const fetchShipmentDetails = useMutation({
     mutationFn: async (vars: { shipment_id: string }) => {
       if (!orderId) throw new Error("Missing orderId")
-      return sdk.client.fetch<any>(`/admin/orders/${orderId}/freightcom/shipments/${vars.shipment_id}`)
+      if (!vars.shipment_id) throw new Error("Missing shipment_id")
+
+      const sid = encodeURIComponent(vars.shipment_id)
+      const resp = await withTimeout(
+        sdk.client.fetch<any>(`/admin/orders/${orderId}/freightcom/shipments/${sid}`),
+        20000
+      )
+      return resp?.shipment ?? resp
     },
-    onSuccess: (resp) => {
-      const shipment = resp?.shipment ?? resp
-      setShipmentDetails(shipment)
-    },
+    onSuccess: (shipment) => setShipmentDetails(shipment),
   })
 
   const bookShipment = useMutation({
@@ -399,15 +401,16 @@ setPersistedShipmentId(id)
       const id = r?.shipment_id
       if (!id) return
 
-      // ✅ Fix "empty booking modal": open modal in a loading state
+      // instant UI update (no reload needed)
       setShipmentId(id)
-      setPersistedShipmentId(id) // ✅ so reloads + button enable work immediately
+      setPersistedShipmentId(id)
+
+      // open shipment modal and fetch details fresh
       setShipmentDetails(null)
       setShowRawShipment(false)
       setIsShipmentModalOpen(true)
 
       await fetchShipmentDetails.mutateAsync({ shipment_id: id })
-
       setIsRatesModalOpen(false)
     },
   })
@@ -416,7 +419,9 @@ setPersistedShipmentId(id)
     mutationFn: async () => {
       if (!orderId) throw new Error("Missing orderId")
       if (!existingShipmentId) throw new Error("Missing shipmentId")
-      return sdk.client.fetch<any>(`/admin/orders/${orderId}/freightcom/shipments/${existingShipmentId}/cancel`, {
+
+      const sid = encodeURIComponent(existingShipmentId)
+      return sdk.client.fetch<any>(`/admin/orders/${orderId}/freightcom/shipments/${sid}/cancel`, {
         method: "POST",
       })
     },
@@ -494,7 +499,6 @@ setPersistedShipmentId(id)
           </Text>
         )}
 
-        {/* Destination preview BEFORE click */}
         <div className="rounded-md border border-ui-border-base p-3">
           <Text size="small" className="text-ui-fg-subtle">Destination (from order)</Text>
           <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -514,7 +518,6 @@ setPersistedShipmentId(id)
           </div>
         </div>
 
-        {/* Ship date + defaults */}
         <div className="rounded-md border border-ui-border-base p-3 space-y-3">
           <Text size="small" className="text-ui-fg-subtle">Shipment settings</Text>
 
@@ -544,9 +547,7 @@ setPersistedShipmentId(id)
             </div>
           </div>
 
-          <Text size="xsmall" className="text-ui-fg-subtle">
-            Package defaults used when variant dims/weight are missing
-          </Text>
+          <Text size="xsmall" className="text-ui-fg-subtle">Package defaults used when variant dims/weight are missing</Text>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
             <div>
@@ -568,7 +569,6 @@ setPersistedShipmentId(id)
           </div>
         </div>
 
-        {/* Backend preview (collapsible) */}
         <div className="rounded-md border border-ui-border-base p-3">
           <div className="flex items-center justify-between gap-2">
             <Text size="small" className="text-ui-fg-subtle">Backend preview</Text>
@@ -583,14 +583,12 @@ setPersistedShipmentId(id)
             </Text>
           ) : (
             <pre className="text-xs mt-2 p-2 bg-ui-bg-subtle rounded overflow-auto max-h-48">
-{JSON.stringify(meta.preview, null, 2)}
+              {JSON.stringify(meta.preview, null, 2)}
             </pre>
           )}
 
           {requestId && !done && (
-            <Text size="small" className="text-ui-fg-subtle mt-2">
-              Processing… modal will open automatically when ready.
-            </Text>
+            <Text size="small" className="text-ui-fg-subtle mt-2">Processing… modal will open automatically when ready.</Text>
           )}
         </div>
       </div>
@@ -598,14 +596,17 @@ setPersistedShipmentId(id)
       {/* Rates modal */}
       <FocusModal open={isRatesModalOpen} onOpenChange={setIsRatesModalOpen}>
         <FocusModal.Content className="h-[95vh] w-[95vw] max-w-none overflow-hidden">
-          <FocusModal.Header>
-            <div className="flex items-center justify-between w-full">
-              <Heading level="h2">{step === 1 ? "Step 1 — Select Rate" : "Step 2 — Payment + Book"}</Heading>
-              <FocusModal.Close asChild>
-                <Button size="small" variant="secondary">Close</Button>
-              </FocusModal.Close>
-            </div>
-          </FocusModal.Header>
+<FocusModal.Header>
+  <div className="flex items-center justify-between w-full">
+    <FocusModal.Title>
+      {step === 1 ? "Step 1 — Select Rate" : "Step 2 — Payment + Book"}
+    </FocusModal.Title>
+
+    <FocusModal.Close asChild>
+      <Button size="small" variant="secondary">Close</Button>
+    </FocusModal.Close>
+  </div>
+</FocusModal.Header>
 
           <FocusModal.Body className="p-6 overflow-y-auto h-[calc(95vh-64px)]">
             <div className="flex items-center gap-2 mb-4">
@@ -751,29 +752,41 @@ setPersistedShipmentId(id)
           if (!existingShipmentId) return
           setShipmentId(existingShipmentId)
 
+          // IMPORTANT: reset mutation + state each open
+          fetchShipmentDetails.reset()
           setShipmentDetails(null)
           setShowRawShipment(false)
+
           fetchShipmentDetails.mutate({ shipment_id: existingShipmentId })
         }}
       >
-        {(fetchShipmentDetails.error as any)?.message ? (
-  <Text size="small" className="text-ui-fg-error">
-    {String((fetchShipmentDetails.error as any).message)}
-  </Text>
-) : null}
         <FocusModal.Content className="h-[95vh] w-[95vw] max-w-none overflow-hidden">
-          <FocusModal.Header>
-            <div className="flex items-center justify-between w-full">
-              <Heading level="h2">Shipment</Heading>
-              <FocusModal.Close asChild>
-                <Button size="small" variant="secondary">Close</Button>
-              </FocusModal.Close>
-            </div>
-          </FocusModal.Header>
+<FocusModal.Header>
+  <div className="flex items-center justify-between w-full">
+    <FocusModal.Title>Shipment</FocusModal.Title>
+
+    <FocusModal.Close asChild>
+      <Button size="small" variant="secondary">Close</Button>
+    </FocusModal.Close>
+  </div>
+</FocusModal.Header>
 
           <FocusModal.Body className="p-6 overflow-y-auto h-[calc(95vh-64px)]">
             {!existingShipmentId ? (
               <Text size="small" className="text-ui-fg-subtle">No shipment id found yet.</Text>
+            ) : fetchShipmentDetails.isError ? (
+              <div className="space-y-2">
+                <Text size="small" className="text-ui-fg-error">
+                  {String((fetchShipmentDetails.error as any)?.message || "Failed to load shipment")}
+                </Text>
+                <Button
+                  size="small"
+                  variant="secondary"
+                  onClick={() => fetchShipmentDetails.mutate({ shipment_id: existingShipmentId })}
+                >
+                  Retry
+                </Button>
+              </div>
             ) : fetchShipmentDetails.isPending || !shipmentDetails ? (
               <Text size="small" className="text-ui-fg-subtle">Loading shipment details…</Text>
             ) : shipmentSummary ? (
@@ -831,7 +844,6 @@ setPersistedShipmentId(id)
                   </Button>
                 </div>
 
-                {/* Raw shipment (collapsible) */}
                 <div className="rounded-md border border-ui-border-base p-3">
                   <div className="flex items-center justify-between gap-2">
                     <Text size="small" className="text-ui-fg-subtle">Raw shipment</Text>
@@ -842,7 +854,7 @@ setPersistedShipmentId(id)
 
                   {!showRawShipment ? null : (
                     <pre className="text-xs mt-2 p-2 bg-ui-bg-subtle rounded overflow-auto max-h-96">
-{JSON.stringify(shipmentDetails, null, 2)}
+                      {JSON.stringify(shipmentDetails, null, 2)}
                     </pre>
                   )}
                 </div>
