@@ -106,6 +106,10 @@ export default function FreightcomRatesWidget({ data }: any) {
   const order = getOrderFromWidgetData(data)
   const orderId = order?.id
 
+  // ✅ shipment id that survives page reloads (fetched from API)
+  const [persistedShipmentId, setPersistedShipmentId] = useState<string | null>(null)
+  const [isHydratingShipmentId, setIsHydratingShipmentId] = useState(false)
+
   // Package defaults
   const [unitSystem, setUnitSystem] = useState<"metric" | "imperial">("metric")
   const [defWeightG, setDefWeightG] = useState(500)
@@ -158,6 +162,7 @@ export default function FreightcomRatesWidget({ data }: any) {
   const [showPreview, setShowPreview] = useState(false)
   const [showRawShipment, setShowRawShipment] = useState(false)
 
+  // Destination preview
   const ship = order?.shipping_address
   const destinationPreview = useMemo(() => {
     return {
@@ -189,6 +194,38 @@ export default function FreightcomRatesWidget({ data }: any) {
     }
     return null
   }, [pages, selectedServiceId])
+
+  // ✅ Hydrate shipment id from the Admin API (fixes reload -> "no shipment found")
+  useEffect(() => {
+    if (!orderId) return
+
+    // try widget data first
+    const fromData = (order?.metadata?.freightcom?.shipment_id as string | undefined) ?? null
+    if (fromData) {
+      setPersistedShipmentId(fromData)
+      return
+    }
+
+    setIsHydratingShipmentId(true)
+    ;(async () => {
+      try {
+        const resp = await sdk.client.fetch<any>(`/admin/orders/${orderId}`)
+        const id =
+          (resp?.order?.metadata?.freightcom?.shipment_id as string | undefined) ??
+          (resp?.metadata?.freightcom?.shipment_id as string | undefined) ??
+          null
+        setPersistedShipmentId(id)
+      } catch {
+        setPersistedShipmentId(null)
+      } finally {
+        setIsHydratingShipmentId(false)
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderId])
+
+  // prefer in-memory shipmentId (from booking) else persisted (from API)
+  const existingShipmentId = (shipmentId ?? persistedShipmentId) as string | null
 
   const ratesMutation = useMutation({
     mutationFn: async (vars: { offset: number; openModalOnReady?: boolean }) => {
@@ -367,14 +404,13 @@ export default function FreightcomRatesWidget({ data }: any) {
 
       // ✅ Fix "empty booking modal": open modal in a loading state
       setShipmentId(id)
+      setPersistedShipmentId(id) // ✅ so reloads + button enable work immediately
       setShipmentDetails(null)
       setShowRawShipment(false)
       setIsShipmentModalOpen(true)
 
-      // Fetch details immediately
       await fetchShipmentDetails.mutateAsync({ shipment_id: id })
 
-      // Close rate selection modal after we’ve started loading shipment modal
       setIsRatesModalOpen(false)
     },
   })
@@ -382,14 +418,15 @@ export default function FreightcomRatesWidget({ data }: any) {
   const cancelShipment = useMutation({
     mutationFn: async () => {
       if (!orderId) throw new Error("Missing orderId")
-      if (!shipmentId) throw new Error("Missing shipmentId")
-      return sdk.client.fetch<any>(`/admin/orders/${orderId}/freightcom/shipments/${shipmentId}/cancel`, {
+      if (!existingShipmentId) throw new Error("Missing shipmentId")
+      return sdk.client.fetch<any>(`/admin/orders/${orderId}/freightcom/shipments/${existingShipmentId}/cancel`, {
         method: "POST",
       })
     },
     onSuccess: () => {
       setShipmentDetails(null)
       setShipmentId(null)
+      setPersistedShipmentId(null)
       setIsShipmentModalOpen(false)
       resetRateFlow()
     },
@@ -419,8 +456,6 @@ export default function FreightcomRatesWidget({ data }: any) {
     (cancelShipment.error as any)?.message ||
     null
 
-  const storedShipmentId = order?.metadata?.freightcom?.shipment_id as string | undefined
-
   return (
     <Container className="divide-y p-0">
       <div className="flex items-start justify-between px-6 py-4 gap-4">
@@ -448,9 +483,9 @@ export default function FreightcomRatesWidget({ data }: any) {
           <Button
             variant="secondary"
             onClick={() => setIsShipmentModalOpen(true)}
-            disabled={!storedShipmentId && !shipmentId}
+            disabled={!existingShipmentId || isHydratingShipmentId}
           >
-            View Shipment
+            {isHydratingShipmentId ? "Loading…" : "View Shipment"}
           </Button>
         </div>
       </div>
@@ -716,13 +751,12 @@ export default function FreightcomRatesWidget({ data }: any) {
           setIsShipmentModalOpen(o)
           if (!o) return
 
-          const id = shipmentId ?? storedShipmentId ?? null
-          if (!id) return
+          if (!existingShipmentId) return
+          setShipmentId(existingShipmentId)
 
-          setShipmentId(id)
-          setShipmentDetails(null) // ✅ ensures we show loading state
+          setShipmentDetails(null)
           setShowRawShipment(false)
-          fetchShipmentDetails.mutate({ shipment_id: id })
+          fetchShipmentDetails.mutate({ shipment_id: existingShipmentId })
         }}
       >
         <FocusModal.Content className="h-[95vh] w-[95vw] max-w-none overflow-hidden">
@@ -736,7 +770,7 @@ export default function FreightcomRatesWidget({ data }: any) {
           </FocusModal.Header>
 
           <FocusModal.Body className="p-6 overflow-y-auto h-[calc(95vh-64px)]">
-            {!shipmentId ? (
+            {!existingShipmentId ? (
               <Text size="small" className="text-ui-fg-subtle">No shipment id found yet.</Text>
             ) : fetchShipmentDetails.isPending || !shipmentDetails ? (
               <Text size="small" className="text-ui-fg-subtle">Loading shipment details…</Text>
@@ -780,7 +814,7 @@ export default function FreightcomRatesWidget({ data }: any) {
                 <div className="flex items-center gap-2">
                   <Button
                     variant="secondary"
-                    onClick={() => shipmentId && fetchShipmentDetails.mutate({ shipment_id: shipmentId })}
+                    onClick={() => existingShipmentId && fetchShipmentDetails.mutate({ shipment_id: existingShipmentId })}
                     disabled={fetchShipmentDetails.isPending}
                   >
                     Refresh
