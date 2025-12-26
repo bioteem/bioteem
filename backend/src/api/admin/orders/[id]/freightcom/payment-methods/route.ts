@@ -57,7 +57,7 @@ function normalizePaymentMethods(raw: any) {
 
 export const GET = async (req: MedusaRequest, res: MedusaResponse) => {
   try {
-    const path = process.env.FREIGHTCOM_PAYMENT_METHODS_PATH || "/payment-methods"
+    const path = "/finance/payment-methods"
     const raw = await freightcomRequest(path)
 
     return res.status(200).json({
