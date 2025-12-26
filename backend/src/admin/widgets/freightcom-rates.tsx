@@ -63,6 +63,15 @@ type BookShipmentResp = {
   label_url?: string | null
 }
 
+type TrackingEvent = {
+  type?: string
+  when?: string
+  where?: { city?: string; region?: string; country?: string }
+  message?: string
+}
+
+type TrackingEventsResp = { events?: TrackingEvent[] }
+
 function getOrderFromWidgetData(data: any) {
   return data?.order ?? data?.resource ?? data ?? null
 }
@@ -98,10 +107,14 @@ function defaultShipDateISO() {
 
 function pickLabelUrlFromShipment(shipment: any): string | null {
   const labels = shipment?.labels
-  if (Array.isArray(labels) && labels.length) {
-    return labels[0]?.url || null
-  }
+  if (Array.isArray(labels) && labels.length) return labels[0]?.url || null
   return shipment?.label_url || null
+}
+
+function fmtWhere(w?: { city?: string; region?: string; country?: string }) {
+  if (!w) return "—"
+  const parts = [w.city, w.region, w.country].filter(Boolean)
+  return parts.length ? parts.join(", ") : "—"
 }
 
 export default function FreightcomRatesWidget({ data }: any) {
@@ -115,10 +128,13 @@ export default function FreightcomRatesWidget({ data }: any) {
   const [defWCm, setDefWCm] = useState(15)
   const [defHCm, setDefHCm] = useState(10)
 
+  // per-offset paging meta (prevents “page 2 next sends me back to page 1”)
+  const [offsetMeta, setOffsetMeta] = useState<Record<number, { next_offset?: number; rates_total?: number }>>({})
+
   // Ship date selection
   const [shipDateISO, setShipDateISO] = useState<string>(() => defaultShipDateISO())
 
-  // Modal / stepper
+  // Rates modal / stepper
   const [isRatesModalOpen, setIsRatesModalOpen] = useState(false)
   const [step, setStep] = useState<1 | 2>(1)
 
@@ -148,10 +164,11 @@ export default function FreightcomRatesWidget({ data }: any) {
   const [paymentMethods, setPaymentMethods] = useState<{ id: string; label: string }[]>([])
   const [paymentMethodId, setPaymentMethodId] = useState<string | null>(null)
 
-  // Shipment modal
+  // Shipment modal + details + tracking events
   const [isShipmentModalOpen, setIsShipmentModalOpen] = useState(false)
   const [shipmentId, setShipmentId] = useState<string | null>(null)
   const [shipmentDetails, setShipmentDetails] = useState<any | null>(null)
+  const [trackingEvents, setTrackingEvents] = useState<TrackingEvent[]>([])
 
   const ship = order?.shipping_address
   const destinationPreview = useMemo(() => {
@@ -217,41 +234,44 @@ export default function FreightcomRatesWidget({ data }: any) {
         next_offset: (r as any).next_offset,
       })
 
-      if (r.status === "ready") {
-        const pageRates = (r.rates || []) as FreightcomRate[]
-        const offset = vars.offset
-
-        // ✅ IMPORTANT: do not use stale cursorOffsets here
-        setPages((prevPages) => {
-          // we'll update after we know index via setCursorOffsets
-          return prevPages
-        })
-
-        setCursorOffsets((prevOffsets) => {
-          const idx = prevOffsets.indexOf(offset)
-          const nextOffsets = idx >= 0 ? prevOffsets : [...prevOffsets, offset]
-
-          setPages((prevPages) => {
-            const nextPages = [...prevPages]
-            const pageIdx = idx >= 0 ? idx : nextOffsets.length - 1
-            nextPages[pageIdx] = pageRates
-            return nextPages
-          })
-
-          // move to page index
-          setPageIndex(idx >= 0 ? idx : nextOffsets.length - 1)
-
-          return nextOffsets
-        })
-
-        if (!selectedServiceId && pageRates.length) setSelectedServiceId(pageRates[0].service_id)
-
-        if (vars.openModalOnReady) {
-          setStep(1)
-          setIsRatesModalOpen(true)
-        }
-      } else {
+      if (r.status !== "ready") {
         setIsRatesModalOpen(false)
+        return
+      }
+
+      const pageRates = (r.rates || []) as FreightcomRate[]
+      const offset = vars.offset
+
+      // store paging info PER offset (so Next uses the correct next_offset)
+      setOffsetMeta((prev) => ({
+        ...prev,
+        [offset]: {
+          next_offset: (r as any).next_offset,
+          rates_total: (r as any).rates_total,
+        },
+      }))
+
+      // update offsets+pages atomically (avoid stale cursorOffsets bug)
+      setCursorOffsets((prevOffsets) => {
+        const existingIdx = prevOffsets.indexOf(offset)
+        const nextOffsets = existingIdx >= 0 ? prevOffsets : [...prevOffsets, offset]
+        const pageIdx = existingIdx >= 0 ? existingIdx : nextOffsets.length - 1
+
+        setPages((prevPages) => {
+          const nextPages = [...prevPages]
+          nextPages[pageIdx] = pageRates
+          return nextPages
+        })
+
+        setPageIndex(pageIdx)
+        return nextOffsets
+      })
+
+      if (!selectedServiceId && pageRates.length) setSelectedServiceId(pageRates[0].service_id)
+
+      if (vars.openModalOnReady) {
+        setStep(1)
+        setIsRatesModalOpen(true)
       }
     },
   })
@@ -275,6 +295,7 @@ export default function FreightcomRatesWidget({ data }: any) {
     setPaymentMethodId(null)
     setMeta({ request_id: null, status: "idle" })
     setStep(1)
+    setOffsetMeta({})
   }
 
   const startGetRates = () => {
@@ -284,13 +305,19 @@ export default function FreightcomRatesWidget({ data }: any) {
 
   const goNextRatesPage = () => {
     if (!done) return
+
+    // if cached next page exists, just move
     const nextIndex = pageIndex + 1
     if (nextIndex < pages.length) {
       setPageIndex(nextIndex)
       return
     }
 
-    const nextOffset = meta.next_offset ?? 0
+    // otherwise fetch next_offset for CURRENT offset
+    const currentOffset = cursorOffsets[pageIndex] ?? 0
+    const nextOffset = offsetMeta[currentOffset]?.next_offset
+    if (typeof nextOffset !== "number") return
+
     const existingIdx = cursorOffsets.indexOf(nextOffset)
     if (existingIdx >= 0) {
       setPageIndex(existingIdx)
@@ -313,6 +340,29 @@ export default function FreightcomRatesWidget({ data }: any) {
     },
   })
 
+  const fetchShipmentDetails = useMutation({
+    mutationFn: async (vars: { shipment_id: string }) => {
+      if (!orderId) throw new Error("Missing orderId")
+      return sdk.client.fetch<any>(`/admin/orders/${orderId}/freightcom/shipments/${vars.shipment_id}`)
+    },
+    onSuccess: (resp) => {
+      const shipment = resp?.shipment ?? resp
+      setShipmentDetails(shipment)
+    },
+  })
+
+  const fetchTrackingEvents = useMutation({
+    mutationFn: async (vars: { shipment_id: string }) => {
+      if (!orderId) throw new Error("Missing orderId")
+      return sdk.client.fetch<TrackingEventsResp>(
+        `/admin/orders/${orderId}/freightcom/shipments/${vars.shipment_id}/tracking-events`
+      )
+    },
+    onSuccess: (resp) => {
+      setTrackingEvents(Array.isArray(resp?.events) ? resp.events! : [])
+    },
+  })
+
   const bookShipment = useMutation({
     mutationFn: async () => {
       if (!orderId) throw new Error("Missing orderId")
@@ -332,7 +382,6 @@ export default function FreightcomRatesWidget({ data }: any) {
             default_w_cm: defWCm,
             default_h_cm: defHCm,
           },
-          // optional helpers (saved to metadata)
           carrier_name: selectedRate.carrier_name,
           service_name: selectedRate.service_name,
           quoted_total: selectedRate.total,
@@ -343,27 +392,13 @@ export default function FreightcomRatesWidget({ data }: any) {
       const id = r?.shipment_id
       if (!id) return
       setShipmentId(id)
-
-      // prefer snapshot if backend returned it
       if (r.shipment) setShipmentDetails(r.shipment)
 
-      // open shipment modal and fetch full details (fresh)
       setIsShipmentModalOpen(true)
       await fetchShipmentDetails.mutateAsync({ shipment_id: id })
+      await fetchTrackingEvents.mutateAsync({ shipment_id: id })
 
-      // close rates flow
       setIsRatesModalOpen(false)
-    },
-  })
-
-  const fetchShipmentDetails = useMutation({
-    mutationFn: async (vars: { shipment_id: string }) => {
-      if (!orderId) throw new Error("Missing orderId")
-      return sdk.client.fetch<any>(`/admin/orders/${orderId}/freightcom/shipments/${vars.shipment_id}`)
-    },
-    onSuccess: (resp) => {
-      const shipment = resp?.shipment ?? resp
-      setShipmentDetails(shipment)
     },
   })
 
@@ -371,14 +406,15 @@ export default function FreightcomRatesWidget({ data }: any) {
     mutationFn: async () => {
       if (!orderId) throw new Error("Missing orderId")
       if (!shipmentId) throw new Error("Missing shipmentId")
+      // this calls YOUR backend cancel endpoint
       return sdk.client.fetch<any>(`/admin/orders/${orderId}/freightcom/shipments/${shipmentId}/cancel`, {
         method: "POST",
       })
     },
     onSuccess: () => {
-      // reset local UI for now
       setShipmentDetails(null)
       setShipmentId(null)
+      setTrackingEvents([])
       setIsShipmentModalOpen(false)
       resetRateFlow()
     },
@@ -399,6 +435,15 @@ export default function FreightcomRatesWidget({ data }: any) {
     const label_url = pickLabelUrlFromShipment(s)
     return { tracking_url, tracking_number, label_url, state: s.state, id: s.id }
   }, [shipmentDetails])
+
+  const anyError =
+    (ratesMutation.error as any)?.message ||
+    (loadPaymentMethods.error as any)?.message ||
+    (bookShipment.error as any)?.message ||
+    (fetchShipmentDetails.error as any)?.message ||
+    (fetchTrackingEvents.error as any)?.message ||
+    (cancelShipment.error as any)?.message ||
+    null
 
   return (
     <Container className="divide-y p-0">
@@ -435,16 +480,9 @@ export default function FreightcomRatesWidget({ data }: any) {
       </div>
 
       <div className="px-6 py-4 space-y-3">
-        {(ratesMutation.isError || loadPaymentMethods.isError || bookShipment.isError || fetchShipmentDetails.isError || cancelShipment.isError) && (
+        {anyError && (
           <Text size="small" className="text-ui-fg-error">
-            {String(
-              (ratesMutation.error as any)?.message ||
-              (loadPaymentMethods.error as any)?.message ||
-              (bookShipment.error as any)?.message ||
-              (fetchShipmentDetails.error as any)?.message ||
-              (cancelShipment.error as any)?.message ||
-              "Error"
-            )}
+            {String(anyError)}
           </Text>
         )}
 
@@ -585,7 +623,8 @@ export default function FreightcomRatesWidget({ data }: any) {
               <>
                 <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
                   <Text size="small" className="text-ui-fg-subtle">
-                    Page {pageIndex + 1} / {Math.max(1, pages.length)} • Showing {currentRates.length} / {meta.rates_total ?? "?"}
+                    Page {pageIndex + 1} / {Math.max(1, pages.length)} • Showing {currentRates.length} /{" "}
+                    {offsetMeta[cursorOffsets[pageIndex] ?? 0]?.rates_total ?? meta.rates_total ?? "?"}
                   </Text>
 
                   <div className="flex items-center gap-2">
@@ -697,6 +736,7 @@ export default function FreightcomRatesWidget({ data }: any) {
             if (id) {
               setShipmentId(id)
               fetchShipmentDetails.mutate({ shipment_id: id })
+              fetchTrackingEvents.mutate({ shipment_id: id })
             }
           }
         }}
@@ -753,10 +793,46 @@ export default function FreightcomRatesWidget({ data }: any) {
                   </Text>
                 </div>
 
+                {/* Tracking events */}
+                <div className="rounded-md border border-ui-border-base p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <Text size="small" className="text-ui-fg-subtle">Tracking events</Text>
+                    <Button
+                      size="small"
+                      variant="secondary"
+                      onClick={() => shipmentId && fetchTrackingEvents.mutate({ shipment_id: shipmentId })}
+                      disabled={fetchTrackingEvents.isPending}
+                    >
+                      {fetchTrackingEvents.isPending ? "Refreshing…" : "Refresh events"}
+                    </Button>
+                  </div>
+
+                  {trackingEvents.length === 0 ? (
+                    <Text size="small" className="text-ui-fg-subtle mt-2">No events yet.</Text>
+                  ) : (
+                    <div className="mt-2 space-y-2">
+                      {trackingEvents.map((e, idx) => (
+                        <div key={`${e.when ?? "x"}_${idx}`} className="rounded border border-ui-border-base p-2">
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <Text className="font-medium">{e.type || "event"}</Text>
+                            <Text size="small" className="text-ui-fg-subtle">{e.when || "—"}</Text>
+                          </div>
+                          <Text size="small" className="text-ui-fg-subtle">{fmtWhere(e.where)}</Text>
+                          {e.message ? <Text size="small" className="mt-1">{e.message}</Text> : null}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
                 <div className="flex items-center gap-2">
                   <Button
                     variant="secondary"
-                    onClick={() => fetchShipmentDetails.mutate({ shipment_id: shipmentId })}
+                    onClick={() => {
+                      if (!shipmentId) return
+                      fetchShipmentDetails.mutate({ shipment_id: shipmentId })
+                      fetchTrackingEvents.mutate({ shipment_id: shipmentId })
+                    }}
                     disabled={fetchShipmentDetails.isPending}
                   >
                     Refresh
