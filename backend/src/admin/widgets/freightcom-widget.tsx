@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import { defineWidgetConfig } from "@medusajs/admin-sdk"
-import { Container, Heading, Button, Text, Badge, FocusModal } from "@medusajs/ui"
+import { Container, Button, Text, Badge, FocusModal, Heading } from "@medusajs/ui"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { sdk } from "../lib/sdk"
 
@@ -63,6 +63,32 @@ type BookShipmentResp = {
   label_url?: string | null
 }
 
+type PickupTime = { hour: number; minute: number }
+type PickupDate = JsonDate
+
+type PickupScheduleBody = {
+  pickup_details: {
+    pre_scheduled_pickup: boolean
+    date: PickupDate
+    ready_at: PickupTime
+    ready_until: PickupTime
+    pickup_location?: string
+    contact_name?: string
+    contact_phone_number?: { number: string; extension?: string }
+  }
+  dispatch_details?: {
+    date?: PickupDate
+    ready_at?: PickupTime
+    ready_until?: PickupTime
+  }
+}
+
+type PickupStatusResp = {
+  status?: string // e.g. "pending" etc.
+  error?: string
+  pickup_confirmation_number?: string
+}
+
 function getOrderFromWidgetData(data: any) {
   return data?.order ?? data?.resource ?? data ?? null
 }
@@ -96,6 +122,15 @@ function defaultShipDateISO() {
   return `${yyyy}-${mm}-${dd}`
 }
 
+function toPickupDate(iso: string): PickupDate {
+  return toJsonDate(iso)
+}
+
+function timeLabel(t?: PickupTime) {
+  if (!t) return "—"
+  return `${String(t.hour).padStart(2, "0")}:${String(t.minute).padStart(2, "0")}`
+}
+
 function pickLabelUrlFromShipment(shipment: any): string | null {
   const labels = shipment?.labels
   if (Array.isArray(labels) && labels.length) return labels[0]?.url || null
@@ -107,19 +142,27 @@ export default function FreightcomRatesWidget({ data }: any) {
   const orderId = fallbackOrder?.id
   const qc = useQueryClient()
 
-  // ✅ Always keep a fresh order object (metadata changes show immediately)
+  // Always keep a fresh order object so metadata updates appear immediately
   const orderQuery = useQuery({
     queryKey: ["admin-order", orderId],
     enabled: !!orderId,
     queryFn: async () => sdk.client.fetch<any>(`/admin/orders/${orderId}`),
-    staleTime: 5_000,
+    staleTime: 2_500,
   })
 
   const order = orderQuery.data?.order ?? fallbackOrder
 
-  // ✅ Single source of truth for shipment id
-  const shipmentIdFromMeta =
-    (order?.metadata?.freightcom_shipment_id as string | undefined) ?? null
+  // Single source of truth for shipment id
+  const shipmentIdFromMeta = (order?.metadata?.freightcom_shipment_id as string | undefined) ?? null
+
+  const pickupConfirmationFromMeta =
+  (order?.metadata?.freightcom_pickup_confirmation_number as string | undefined) ?? null
+
+const pickupStatusFromMeta =
+  (order?.metadata?.freightcom_pickup_status as string | undefined) ?? null
+
+const pickupLastScheduledAt =
+  (order?.metadata?.freightcom_pickup_scheduled_at as string | undefined) ?? null
 
   // Package defaults
   const [unitSystem, setUnitSystem] = useState<"metric" | "imperial">("metric")
@@ -128,7 +171,7 @@ export default function FreightcomRatesWidget({ data }: any) {
   const [defWCm, setDefWCm] = useState(15)
   const [defHCm, setDefHCm] = useState(10)
 
-  // Ship date selection
+  // Ship date
   const [shipDateISO, setShipDateISO] = useState<string>(() => defaultShipDateISO())
 
   // Rates modal / stepper
@@ -138,15 +181,22 @@ export default function FreightcomRatesWidget({ data }: any) {
   // Selection
   const [selectedServiceId, setSelectedServiceId] = useState<string | null>(null)
 
-  // Page caching
+  // Paging
   const [pages, setPages] = useState<FreightcomRate[][]>([])
   const [cursorOffsets, setCursorOffsets] = useState<number[]>([0])
   const [pageIndex, setPageIndex] = useState(0)
-
-  // per-offset paging meta
   const [offsetMeta, setOffsetMeta] = useState<Record<number, { next_offset?: number; rates_total?: number }>>({})
 
-  // Response meta
+  const [isPickupModalOpen, setIsPickupModalOpen] = useState(false)
+
+// simple defaults; tweak however you want
+const [pickupDateISO, setPickupDateISO] = useState(() => defaultShipDateISO())
+const [readyAt, setReadyAt] = useState<PickupTime>({ hour: 10, minute: 0 })
+const [readyUntil, setReadyUntil] = useState<PickupTime>({ hour: 16, minute: 0 })
+const [pickupLocation, setPickupLocation] = useState("Front desk")
+const [pickupContactName, setPickupContactName] = useState("Warehouse")
+const [pickupPhone, setPickupPhone] = useState("")
+  // Meta
   const [meta, setMeta] = useState<{
     request_id: string | null
     status: "idle" | "processing" | "ready"
@@ -169,7 +219,6 @@ export default function FreightcomRatesWidget({ data }: any) {
   const [showPreview, setShowPreview] = useState(false)
   const [showRawShipment, setShowRawShipment] = useState(false)
 
-  // Destination preview
   const ship = order?.shipping_address
   const destinationPreview = useMemo(() => {
     return {
@@ -202,7 +251,18 @@ export default function FreightcomRatesWidget({ data }: any) {
     return null
   }, [pages, selectedServiceId])
 
-  // ✅ Shipment details query (prevents reload-stuck)
+  const pickupQuery = useQuery({
+  queryKey: ["freightcom-pickup", orderId, shipmentIdFromMeta, pickupConfirmationFromMeta, isPickupModalOpen],
+  enabled: !!orderId && !!shipmentIdFromMeta && isPickupModalOpen,
+  queryFn: async () => {
+    const resp = await sdk.client.fetch<PickupStatusResp>(
+      `/admin/orders/${orderId}/freightcom/shipments/${shipmentIdFromMeta}/pickup`
+    )
+    return resp
+  },
+  staleTime: 10_000,
+})
+  // Shipment details query (reload-safe)
   const shipmentQuery = useQuery({
     queryKey: ["freightcom-shipment", orderId, shipmentIdFromMeta],
     enabled: !!orderId && !!shipmentIdFromMeta && isShipmentModalOpen,
@@ -226,6 +286,18 @@ export default function FreightcomRatesWidget({ data }: any) {
     const label_url = pickLabelUrlFromShipment(s)
     return { tracking_url, tracking_number, label_url, state: s.state, id: s.id }
   }, [shipmentDetails])
+
+  const resetRateFlow = () => {
+    setPages([])
+    setCursorOffsets([0])
+    setPageIndex(0)
+    setSelectedServiceId(null)
+    setPaymentMethods([])
+    setPaymentMethodId(null)
+    setMeta({ request_id: null, status: "idle" })
+    setStep(1)
+    setOffsetMeta({})
+  }
 
   const ratesMutation = useMutation({
     mutationFn: async (vars: { offset: number; openModalOnReady?: boolean }) => {
@@ -291,14 +363,57 @@ export default function FreightcomRatesWidget({ data }: any) {
       })
 
       if (!selectedServiceId && pageRates.length) setSelectedServiceId(pageRates[0].service_id)
-
       if (vars.openModalOnReady) {
         setStep(1)
         setIsRatesModalOpen(true)
       }
     },
   })
+const schedulePickup = useMutation({
+  mutationFn: async () => {
+    if (!orderId) throw new Error("Missing orderId")
+    if (!shipmentIdFromMeta) throw new Error("No shipment to schedule pickup for.")
 
+    const body: PickupScheduleBody = {
+      pickup_details: {
+        pre_scheduled_pickup: true,
+        date: toPickupDate(pickupDateISO),
+        ready_at: readyAt,
+        ready_until: readyUntil,
+        pickup_location: pickupLocation || undefined,
+        contact_name: pickupContactName || undefined,
+        contact_phone_number: pickupPhone ? { number: pickupPhone } : undefined,
+      },
+    }
+
+    return sdk.client.fetch<any>(
+      `/admin/orders/${orderId}/freightcom/shipments/${shipmentIdFromMeta}/pickup`,
+      { method: "POST", body }
+    )
+  },
+  onSuccess: async () => {
+    // pickup info is saved in metadata by backend -> pull fresh order immediately
+    await qc.invalidateQueries({ queryKey: ["admin-order", orderId] })
+    await qc.invalidateQueries({ queryKey: ["freightcom-pickup", orderId] })
+  },
+})
+
+const cancelPickup = useMutation({
+  mutationFn: async () => {
+    if (!orderId) throw new Error("Missing orderId")
+    if (!shipmentIdFromMeta) throw new Error("No shipment on this order.")
+
+    return sdk.client.fetch<any>(
+      `/admin/orders/${orderId}/freightcom/shipments/${shipmentIdFromMeta}/pickup/cancel`,
+      { method: "POST" }
+    )
+  },
+  onSuccess: async () => {
+    // backend clears pickup metadata -> refresh order so UI resets
+    await qc.invalidateQueries({ queryKey: ["admin-order", orderId] })
+    await qc.invalidateQueries({ queryKey: ["freightcom-pickup", orderId] })
+  },
+})
   // Poll while processing
   useEffect(() => {
     if (meta.status !== "processing") return
@@ -308,18 +423,6 @@ export default function FreightcomRatesWidget({ data }: any) {
     return () => clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meta.status])
-
-  const resetRateFlow = () => {
-    setPages([])
-    setCursorOffsets([0])
-    setPageIndex(0)
-    setSelectedServiceId(null)
-    setPaymentMethods([])
-    setPaymentMethodId(null)
-    setMeta({ request_id: null, status: "idle" })
-    setStep(1)
-    setOffsetMeta({})
-  }
 
   const startGetRates = () => {
     resetRateFlow()
@@ -388,41 +491,41 @@ export default function FreightcomRatesWidget({ data }: any) {
       })
     },
     onSuccess: async () => {
-      // ✅ pull in new metadata immediately
+      // get latest metadata immediately (shipment id, tracking, etc.)
       await qc.invalidateQueries({ queryKey: ["admin-order", orderId] })
+
+      // open shipment modal; shipmentQuery will fetch with new shipment id
       setShowRawShipment(false)
-      setIsShipmentModalOpen(true) // shipmentQuery will fetch using fresh shipment id
+      setIsShipmentModalOpen(true)
+
+      // close rates flow
       setIsRatesModalOpen(false)
     },
   })
 
-const cancelShipment = useMutation({
-  mutationFn: async () => {
-    if (!orderId) throw new Error("Missing orderId")
-    if (!shipmentIdFromMeta) throw new Error("Missing shipmentId")
+  const cancelShipment = useMutation({
+    mutationFn: async () => {
+      if (!orderId) throw new Error("Missing orderId")
+      if (!shipmentIdFromMeta) throw new Error("Missing shipmentId")
 
-    return sdk.client.fetch<any>(
-      `/admin/orders/${orderId}/freightcom/shipments/${shipmentIdFromMeta}/cancel`,
-      { method: "POST" }
-    )
-  },
-  onSuccess: async () => {
-    // 1) close modals + wipe widget UI state
-    setIsShipmentModalOpen(false)
-    setShowRawShipment(false)
+      return sdk.client.fetch<any>(
+        `/admin/orders/${orderId}/freightcom/shipments/${shipmentIdFromMeta}/cancel`,
+        { method: "POST" }
+      )
+    },
+    onSuccess: async () => {
+      // Close shipment modal and wipe local UI state
+      setIsShipmentModalOpen(false)
+      setIsRatesModalOpen(false)
+      setShowRawShipment(false)
+      setShowPreview(false)
+      resetRateFlow()
 
-    // if you have these in your widget:
-    resetRateFlow()
-    setIsRatesModalOpen(false)
-    setStep(1)
-
-    // 2) pull fresh order metadata immediately (so View Shipment disables)
-    await qc.invalidateQueries({ queryKey: ["admin-order", orderId] })
-
-    // 3) also clear shipment details cache
-    await qc.invalidateQueries({ queryKey: ["freightcom-shipment", orderId] })
-  },
-})
+      // Pull fresh metadata (so shipmentId becomes null -> button disables)
+      await qc.invalidateQueries({ queryKey: ["admin-order", orderId] })
+      await qc.invalidateQueries({ queryKey: ["freightcom-shipment", orderId] })
+    },
+  })
 
   const goToStep2 = async () => {
     if (!selectedRate?.service_id) return
@@ -446,6 +549,7 @@ const cancelShipment = useMutation({
           <Text size="small" className="text-ui-fg-subtle">
             Step 1: choose a rate • Step 2: choose payment + book shipment.
           </Text>
+
           <div className="mt-2 flex items-center gap-2 flex-wrap">
             {headerBadge}
             {requestId ? <Text size="small" className="text-ui-fg-subtle break-all">Request: {requestId}</Text> : null}
@@ -469,15 +573,18 @@ const cancelShipment = useMutation({
           >
             {orderQuery.isPending ? "Loading…" : "View Shipment"}
           </Button>
+          <Button
+  variant="secondary"
+  onClick={() => setIsPickupModalOpen(true)}
+  disabled={!shipmentIdFromMeta || orderQuery.isPending}
+>
+  Pickup
+</Button>
         </div>
       </div>
 
       <div className="px-6 py-4 space-y-3">
-        {anyError && (
-          <Text size="small" className="text-ui-fg-error">
-            {String(anyError)}
-          </Text>
-        )}
+        {anyError && <Text size="small" className="text-ui-fg-error">{String(anyError)}</Text>}
 
         <div className="rounded-md border border-ui-border-base p-3">
           <Text size="small" className="text-ui-fg-subtle">Destination (from order)</Text>
@@ -565,7 +672,7 @@ const cancelShipment = useMutation({
             </Text>
           ) : (
             <pre className="text-xs mt-2 p-2 bg-ui-bg-subtle rounded overflow-auto max-h-48">
-{JSON.stringify(meta.preview, null, 2)}
+              {JSON.stringify(meta.preview, null, 2)}
             </pre>
           )}
 
@@ -758,16 +865,16 @@ const cancelShipment = useMutation({
 
                 <div className="rounded-md border border-ui-border-base p-3">
                   <Text size="small" className="text-ui-fg-subtle">Tracking</Text>
-                  <Text size="small">Tracking number: <span className="font-medium">{shipmentSummary.tracking_number || "—"}</span></Text>
+                  <Text size="small">
+                    Tracking number: <span className="font-medium">{shipmentSummary.tracking_number || "—"}</span>
+                  </Text>
                   <Text size="small">
                     Tracking URL:{" "}
                     {shipmentSummary.tracking_url ? (
                       <a className="underline" href={shipmentSummary.tracking_url} target="_blank" rel="noreferrer">
                         Open tracking
                       </a>
-                    ) : (
-                      "—"
-                    )}
+                    ) : "—"}
                   </Text>
                 </div>
 
@@ -779,16 +886,16 @@ const cancelShipment = useMutation({
                       <a className="underline" href={shipmentSummary.label_url} target="_blank" rel="noreferrer">
                         Open label (PDF)
                       </a>
-                    ) : (
-                      "—"
-                    )}
+                    ) : "—"}
                   </Text>
                 </div>
 
                 <div className="flex items-center gap-2">
                   <Button
                     variant="secondary"
-                    onClick={() => qc.invalidateQueries({ queryKey: ["freightcom-shipment", orderId, shipmentIdFromMeta] })}
+                    onClick={() =>
+                      qc.invalidateQueries({ queryKey: ["freightcom-shipment", orderId, shipmentIdFromMeta] })
+                    }
                     disabled={shipmentQuery.isPending}
                   >
                     Refresh
@@ -813,7 +920,7 @@ const cancelShipment = useMutation({
 
                   {!showRawShipment ? null : (
                     <pre className="text-xs mt-2 p-2 bg-ui-bg-subtle rounded overflow-auto max-h-96">
-{JSON.stringify(shipmentDetails, null, 2)}
+                      {JSON.stringify(shipmentDetails, null, 2)}
                     </pre>
                   )}
                 </div>
@@ -824,6 +931,153 @@ const cancelShipment = useMutation({
           </FocusModal.Body>
         </FocusModal.Content>
       </FocusModal>
+      <FocusModal open={isPickupModalOpen} onOpenChange={setIsPickupModalOpen}>
+  <FocusModal.Content className="h-[85vh] w-[95vw] max-w-none overflow-hidden">
+    <FocusModal.Header>
+      <div className="flex items-center justify-between w-full">
+        <FocusModal.Title>Pickup</FocusModal.Title>
+        <FocusModal.Close asChild>
+          <Button size="small" variant="secondary">Close</Button>
+        </FocusModal.Close>
+      </div>
+    </FocusModal.Header>
+
+    <FocusModal.Body className="p-6 overflow-y-auto h-[calc(85vh-64px)]">
+      {!shipmentIdFromMeta ? (
+        <Text size="small" className="text-ui-fg-subtle">Book a shipment first.</Text>
+      ) : (
+        <div className="space-y-4">
+          {/* Current status */}
+          <div className="rounded-md border border-ui-border-base p-3">
+            <Text size="small" className="text-ui-fg-subtle">Current pickup</Text>
+
+            {pickupQuery.isPending ? (
+              <Text size="small" className="text-ui-fg-subtle mt-2">Loading…</Text>
+            ) : pickupQuery.isError ? (
+              <Text size="small" className="text-ui-fg-error mt-2">
+                {String((pickupQuery.error as any)?.message || "Error")}
+              </Text>
+            ) : (
+              <>
+                <Text className="font-medium mt-1">
+                  Status: {pickupStatusFromMeta || pickupQuery.data?.status || "—"}
+                </Text>
+                <Text size="small" className="text-ui-fg-subtle">
+                  Confirmation: {pickupConfirmationFromMeta || pickupQuery.data?.pickup_confirmation_number || "—"}
+                </Text>
+                {pickupLastScheduledAt ? (
+                  <Text size="small" className="text-ui-fg-subtle">Scheduled at: {pickupLastScheduledAt}</Text>
+                ) : null}
+                {pickupQuery.data?.error ? (
+                  <Text size="small" className="text-ui-fg-error mt-2">{pickupQuery.data.error}</Text>
+                ) : null}
+              </>
+            )}
+
+            <div className="flex items-center gap-2 mt-3">
+              <Button
+                size="small"
+                variant="secondary"
+                onClick={() => qc.invalidateQueries({ queryKey: ["freightcom-pickup", orderId] })}
+              >
+                Refresh
+              </Button>
+
+              <Button
+                size="small"
+                variant="danger"
+                onClick={() => cancelPickup.mutate()}
+                disabled={cancelPickup.isPending}
+              >
+                {cancelPickup.isPending ? "Cancelling…" : "Cancel pickup"}
+              </Button>
+            </div>
+          </div>
+
+          {/* Schedule form */}
+          <div className="rounded-md border border-ui-border-base p-3 space-y-3">
+            <Text size="small" className="text-ui-fg-subtle">Schedule pickup</Text>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              <div>
+                <Text size="xsmall" className="text-ui-fg-subtle">Date</Text>
+                <input
+                  type="date"
+                  className="w-full border rounded px-2 py-1"
+                  value={pickupDateISO}
+                  onChange={(e) => setPickupDateISO(e.target.value)}
+                />
+              </div>
+
+              <div>
+                <Text size="xsmall" className="text-ui-fg-subtle">Ready at</Text>
+                <input
+                  type="time"
+                  className="w-full border rounded px-2 py-1"
+                  value={timeLabel(readyAt)}
+                  onChange={(e) => {
+                    const [h, m] = e.target.value.split(":").map(Number)
+                    setReadyAt({ hour: h, minute: m })
+                  }}
+                />
+              </div>
+
+              <div>
+                <Text size="xsmall" className="text-ui-fg-subtle">Ready until</Text>
+                <input
+                  type="time"
+                  className="w-full border rounded px-2 py-1"
+                  value={timeLabel(readyUntil)}
+                  onChange={(e) => {
+                    const [h, m] = e.target.value.split(":").map(Number)
+                    setReadyUntil({ hour: h, minute: m })
+                  }}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              <div>
+                <Text size="xsmall" className="text-ui-fg-subtle">Pickup location</Text>
+                <input
+                  className="w-full border rounded px-2 py-1"
+                  value={pickupLocation}
+                  onChange={(e) => setPickupLocation(e.target.value)}
+                />
+              </div>
+
+              <div>
+                <Text size="xsmall" className="text-ui-fg-subtle">Contact name</Text>
+                <input
+                  className="w-full border rounded px-2 py-1"
+                  value={pickupContactName}
+                  onChange={(e) => setPickupContactName(e.target.value)}
+                />
+              </div>
+
+              <div>
+                <Text size="xsmall" className="text-ui-fg-subtle">Contact phone</Text>
+                <input
+                  className="w-full border rounded px-2 py-1"
+                  placeholder="902xxxxxxx"
+                  value={pickupPhone}
+                  onChange={(e) => setPickupPhone(e.target.value)}
+                />
+              </div>
+            </div>
+
+            <Button
+              onClick={() => schedulePickup.mutate()}
+              disabled={schedulePickup.isPending}
+            >
+              {schedulePickup.isPending ? "Scheduling…" : "Schedule pickup"}
+            </Button>
+          </div>
+        </div>
+      )}
+    </FocusModal.Body>
+  </FocusModal.Content>
+</FocusModal>
     </Container>
   )
 }
