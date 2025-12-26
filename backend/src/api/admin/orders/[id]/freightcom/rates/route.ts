@@ -244,6 +244,9 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         region: "NS",
         country: "CA",
         postal_code: "B0N2T0",
+        phone_number:{
+          number:"9023064110"
+        }
       },
       residential: true,
       email_addresses: [process.env.WAREHOUSE_EMAIL || "sales@bioteem40.ca"],
