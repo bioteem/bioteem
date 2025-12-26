@@ -13,20 +13,12 @@ function requireEnv(name: string) {
 
 function getExpectedShipDate() {
   const d = new Date()
-
-  // After 4pm → start from next day
   if (d.getHours() >= 16) d.setDate(d.getDate() + 1)
-
-  // Skip weekends
   while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1)
-
   return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() }
 }
 
-async function freightcomRequest(
-  path: string,
-  opts?: { method?: string; body?: any }
-) {
+async function freightcomRequest(path: string, opts?: { method?: string; body?: any }) {
   const base = requireEnv("FREIGHTCOM_API_BASE_URL")
   const key = requireEnv("FREIGHTCOM_API_KEY")
 
@@ -34,28 +26,20 @@ async function freightcomRequest(
   const method = opts?.method || "GET"
   const body = opts?.body ? JSON.stringify(opts.body, null, 2) : undefined
 
-  // Outgoing debug
   console.log("📦 Freightcom REQUEST", {
     url,
     method,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: "[REDACTED]",
-    },
+    headers: { "Content-Type": "application/json", Authorization: "[REDACTED]" },
     body: opts?.body,
   })
 
   const res = await fetch(url, {
     method,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: key,
-    },
+    headers: { "Content-Type": "application/json", Authorization: key },
     body,
   })
 
   const text = await res.text().catch(() => "")
-
   let json: any = null
   try {
     json = text ? JSON.parse(text) : null
@@ -64,19 +48,23 @@ async function freightcomRequest(
   }
 
   if (!res.ok) {
-    console.error("❌ Freightcom RESPONSE", {
-      status: res.status,
-      statusText: res.statusText,
-      body: json ?? text,
-    })
-
-    throw new Error(
-      `Freightcom ${res.status}: ${JSON.stringify(json ?? { raw: text })}`
-    )
+    console.error("❌ Freightcom RESPONSE", { status: res.status, statusText: res.statusText, body: json ?? text })
+    throw new Error(`Freightcom ${res.status}: ${JSON.stringify(json ?? { raw: text })}`)
   }
 
   console.log("✅ Freightcom RESPONSE", json ?? text)
   return json ?? { raw: text }
+}
+
+// ---------- units + conversions ----------
+function gToLb(g: number) {
+  return g / 453.59237
+}
+function gToKg(g: number) {
+  return g / 1000
+}
+function cmToIn(cm: number) {
+  return cm / 2.54
 }
 
 function round2(n: number) {
@@ -85,248 +73,186 @@ function round2(n: number) {
 function round1(n: number) {
   return Math.round(n * 10) / 10
 }
-function gToLb(g: number) {
-  return g / 453.59237
-}
-function cmToIn(cm: number) {
-  return cm / 2.54
+
+type PackageOverrides = {
+  unit_system?: "metric" | "imperial" // metric => cm/kg, imperial => in/lb
+  default_weight_g?: number
+  default_l_cm?: number
+  default_w_cm?: number
+  default_h_cm?: number
 }
 
-function buildFreightcomPackages(order: any) {
-  const DEFAULT_WEIGHT_G = Number(process.env.DEFAULT_ITEM_WEIGHT_G || 500)
-  const DEFAULT_L_CM = Number(process.env.DEFAULT_ITEM_LENGTH_CM || 20)
-  const DEFAULT_W_CM = Number(process.env.DEFAULT_ITEM_WIDTH_CM || 15)
-  const DEFAULT_H_CM = Number(process.env.DEFAULT_ITEM_HEIGHT_CM || 10)
+function buildFreightcomPackages(order: any, overrides?: PackageOverrides) {
+  const unitSystem: "metric" | "imperial" = overrides?.unit_system || "imperial"
+
+  const DEFAULT_WEIGHT_G = Number(overrides?.default_weight_g ?? process.env.DEFAULT_ITEM_WEIGHT_G ?? 500)
+  const DEFAULT_L_CM = Number(overrides?.default_l_cm ?? process.env.DEFAULT_ITEM_LENGTH_CM ?? 20)
+  const DEFAULT_W_CM = Number(overrides?.default_w_cm ?? process.env.DEFAULT_ITEM_WIDTH_CM ?? 15)
+  const DEFAULT_H_CM = Number(overrides?.default_h_cm ?? process.env.DEFAULT_ITEM_HEIGHT_CM ?? 10)
 
   const packages: any[] = []
+  let debug = {
+    total_items: 0,
+    used_defaults_for: 0,
+    sum_weight_g: 0,
+  }
 
   for (const item of order.items || []) {
     const qty = Math.max(1, Number(item.quantity || 1))
     const v = item.variant || {}
 
-    const weightG = Number.isFinite(Number(v.weight))
-      ? Number(v.weight)
-      : DEFAULT_WEIGHT_G
-    const Lcm = Number.isFinite(Number(v.length)) ? Number(v.length) : DEFAULT_L_CM
-    const Wcm = Number.isFinite(Number(v.width)) ? Number(v.width) : DEFAULT_W_CM
-    const Hcm = Number.isFinite(Number(v.height))
-      ? Number(v.height)
-      : DEFAULT_H_CM
+    const w = Number(v.weight)
+    const l = Number(v.length)
+    const wi = Number(v.width)
+    const h = Number(v.height)
 
-    const weightLb = Math.max(0.01, round2(gToLb(weightG)))
-    const Lin = Math.max(0.1, round1(cmToIn(Lcm)))
-    const Win = Math.max(0.1, round1(cmToIn(Wcm)))
-    const Hin = Math.max(0.1, round1(cmToIn(Hcm)))
+    const hasAll =
+      Number.isFinite(w) && w > 0 &&
+      Number.isFinite(l) && l > 0 &&
+      Number.isFinite(wi) && wi > 0 &&
+      Number.isFinite(h) && h > 0
+
+    const weightG = hasAll ? w : DEFAULT_WEIGHT_G
+    const Lcm = hasAll ? l : DEFAULT_L_CM
+    const Wcm = hasAll ? wi : DEFAULT_W_CM
+    const Hcm = hasAll ? h : DEFAULT_H_CM
+
+    if (!hasAll) debug.used_defaults_for += qty
 
     for (let i = 0; i < qty; i++) {
-      packages.push({
-        description: item.title || "Package",
-        measurements: {
-          weight: { unit: "lb", value: weightLb },
-          cuboid: { unit: "in", l: Lin, w: Win, h: Hin },
-        },
-      })
+      debug.total_items += 1
+      debug.sum_weight_g += weightG
+
+      if (unitSystem === "metric") {
+        packages.push({
+          description: item.title || "Package",
+          measurements: {
+            weight: { unit: "kg", value: Math.max(0.01, round2(gToKg(weightG))) },
+            cuboid: { unit: "cm", l: Math.max(0.1, round1(Lcm)), w: Math.max(0.1, round1(Wcm)), h: Math.max(0.1, round1(Hcm)) },
+          },
+        })
+      } else {
+        packages.push({
+          description: item.title || "Package",
+          measurements: {
+            weight: { unit: "lb", value: Math.max(0.01, round2(gToLb(weightG))) },
+            cuboid: { unit: "in", l: Math.max(0.1, round1(cmToIn(Lcm))), w: Math.max(0.1, round1(cmToIn(Wcm))), h: Math.max(0.1, round1(cmToIn(Hcm))) },
+          },
+        })
+      }
     }
   }
 
   if (packages.length === 0) {
-    packages.push({
-      description: "Default package",
-      measurements: {
-        weight: { unit: "lb", value: round2(gToLb(DEFAULT_WEIGHT_G)) },
-        cuboid: {
-          unit: "in",
-          l: round1(cmToIn(DEFAULT_L_CM)),
-          w: round1(cmToIn(DEFAULT_W_CM)),
-          h: round1(cmToIn(DEFAULT_H_CM)),
-        },
-      },
-    })
+    // safe fallback
+    const fallback = unitSystem === "metric"
+      ? {
+          description: "Default package",
+          measurements: {
+            weight: { unit: "kg", value: Math.max(0.01, round2(gToKg(DEFAULT_WEIGHT_G))) },
+            cuboid: { unit: "cm", l: round1(DEFAULT_L_CM), w: round1(DEFAULT_W_CM), h: round1(DEFAULT_H_CM) },
+          },
+        }
+      : {
+          description: "Default package",
+          measurements: {
+            weight: { unit: "lb", value: Math.max(0.01, round2(gToLb(DEFAULT_WEIGHT_G))) },
+            cuboid: { unit: "in", l: round1(cmToIn(DEFAULT_L_CM)), w: round1(cmToIn(DEFAULT_W_CM)), h: round1(cmToIn(DEFAULT_H_CM)) },
+          },
+        }
+    packages.push(fallback)
   }
 
-  return packages
+  return { packages, debug, defaults: { DEFAULT_WEIGHT_G, DEFAULT_L_CM, DEFAULT_W_CM, DEFAULT_H_CM, unitSystem } }
 }
 
-/**
- * Freightcom response:
- * {
- *   status: { done: true, total: 127, complete: 127 },
- *   rates: [...]
- * }
- */
-type FreightcomStatus = { done?: boolean; total?: number; complete?: number }
+// ---------- rates selection (10 only + refresh offset) ----------
 type FreightcomRate = {
   service_id: string
-  valid_until?: { year: number; month: number; day: number }
   total?: { value: string; currency: string }
-  base?: { value: string; currency: string }
-  surcharges?: Array<{ type: string; amount?: { value: string; currency: string } }>
-  taxes?: Array<{ type: string; amount?: { value: string; currency: string } }>
-  transit_time_days?: number
-  transit_time_not_available?: boolean
   carrier_name?: string
   service_name?: string
-  paperless?: boolean
-}
-
-type FreightcomRateResponse = {
-  status?: FreightcomStatus
-  rates?: FreightcomRate[]
-  request_id?: string
-}
-
-type NormalizedRate = {
-  id: string
-  carrier: string
-  service: string
-  service_id: string
-  total_cents: number | null
-  total: number | null
-  currency: string | null
-  base_cents: number | null
-  base: number | null
-  transit_days: number | null
-  transit_not_available: boolean
+  transit_time_days?: number
+  transit_time_not_available?: boolean
   valid_until?: { year: number; month: number; day: number }
+  surcharges?: Array<{ type: string; amount?: { value: string; currency: string } }>
+  taxes?: Array<{ type: string; amount?: { value: string; currency: string } }>
   paperless?: boolean
-  surcharges: Array<{
-    type: string
-    amount_cents: number | null
-    amount: number | null
-    currency: string | null
-  }>
-  taxes: Array<{
-    type: string
-    amount_cents: number | null
-    amount: number | null
-    currency: string | null
-  }>
-  raw: FreightcomRate
+  [k: string]: any
 }
 
-function isRatesReadyFreightcom(raw: any): boolean {
-  const r = raw as FreightcomRateResponse
-  return Boolean(r?.status?.done) && Array.isArray(r?.rates)
+function centsValue(rate: FreightcomRate) {
+  const n = Number(rate?.total?.value ?? NaN)
+  return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY
 }
 
-function parseCents(v: any): number | null {
-  // Freightcom values look like "2116" => $21.16
-  const n = typeof v === "string" ? Number(v) : typeof v === "number" ? v : NaN
-  if (!Number.isFinite(n)) return null
-  return Math.round(n)
-}
-function centsToDollars(c: number | null): number | null {
-  return c === null ? null : Math.round(c) / 100
+function transitDays(rate: FreightcomRate) {
+  if (rate.transit_time_not_available) return Number.POSITIVE_INFINITY
+  const n = Number(rate.transit_time_days ?? NaN)
+  return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY
 }
 
-function normalizeFreightcomRate(rate: FreightcomRate): NormalizedRate {
-  const total_cents = parseCents(rate?.total?.value)
-  const base_cents = parseCents(rate?.base?.value)
+function smartTopRates(all: FreightcomRate[], offset: number, limit: number) {
+  const byCheapest = [...all].sort((a, b) => centsValue(a) - centsValue(b))
+  const byFastest = [...all].sort((a, b) => transitDays(a) - transitDays(b))
 
-  const currency = rate?.total?.currency ?? rate?.base?.currency ?? null
+  // union: 5 cheapest + 5 fastest => up to 10, then if still short, fill by a combined sort
+  const wantCheapest = Math.ceil(limit / 2)
+  const wantFastest = Math.floor(limit / 2)
 
-  const surcharges = (rate?.surcharges || []).map((s) => {
-    const cents = parseCents(s?.amount?.value)
-    return {
-      type: s?.type || "unknown",
-      amount_cents: cents,
-      amount: centsToDollars(cents),
-      currency: s?.amount?.currency ?? currency ?? null,
-    }
-  })
+  const union: FreightcomRate[] = []
+  const seen = new Set<string>()
 
-  const taxes = (rate?.taxes || []).map((t) => {
-    const cents = parseCents(t?.amount?.value)
-    return {
-      type: t?.type || "unknown",
-      amount_cents: cents,
-      amount: centsToDollars(cents),
-      currency: t?.amount?.currency ?? currency ?? null,
-    }
-  })
-
-  return {
-    id: rate.service_id,
-    carrier: rate.carrier_name || "Unknown",
-    service: rate.service_name || rate.service_id,
-    service_id: rate.service_id,
-    total_cents,
-    total: centsToDollars(total_cents),
-    currency,
-    base_cents,
-    base: centsToDollars(base_cents),
-    transit_days: Number.isFinite(Number(rate.transit_time_days))
-      ? Number(rate.transit_time_days)
-      : null,
-    transit_not_available: Boolean(rate.transit_time_not_available),
-    valid_until: rate.valid_until,
-    paperless: rate.paperless,
-    surcharges,
-    taxes,
-    raw: rate,
+  function add(r: FreightcomRate) {
+    const id = r.service_id || `${r.carrier_name}-${r.service_name}`
+    if (!id || seen.has(id)) return
+    seen.add(id)
+    union.push(r)
   }
-}
 
-function carrierPriorityScore(carrierName: string): number {
-  const s = (carrierName || "").toLowerCase()
+  byCheapest.slice(0, wantCheapest + offset).slice(offset).forEach(add)
+  byFastest.slice(0, wantFastest + offset).slice(offset).forEach(add)
 
-  // Lower = higher priority
-  if (s.includes("purolator")) return 0
-  if (s.includes("fedex") || s.includes("fed ex")) return 1
-  if (s.includes("ups")) return 2
-  if (s.includes("dhl")) return 3
-  if (s.includes("canada post") || s.includes("canadapost")) return 4
+  // If union short, fill from combined “fast then cheap”
+  if (union.length < limit) {
+    const combined = [...all].sort((a, b) => {
+      const ad = transitDays(a), bd = transitDays(b)
+      if (ad !== bd) return ad - bd
+      return centsValue(a) - centsValue(b)
+    })
+    for (const r of combined) {
+      add(r)
+      if (union.length >= limit) break
+    }
+  }
 
-  // Regional/others
-  if (s.includes("canpar")) return 10
-
-  return 50
-}
-
-function sortRatesMajorFirst(rates: NormalizedRate[]): NormalizedRate[] {
-  return [...rates].sort((a, b) => {
-    const ap = carrierPriorityScore(a.carrier)
-    const bp = carrierPriorityScore(b.carrier)
-    if (ap !== bp) return ap - bp
-
-    // Cheapest first (nulls last)
-    const at = a.total_cents ?? Number.POSITIVE_INFINITY
-    const bt = b.total_cents ?? Number.POSITIVE_INFINITY
-    if (at !== bt) return at - bt
-
-    // Prefer known transit times
-    const aPenalty = a.transit_not_available ? 1 : 0
-    const bPenalty = b.transit_not_available ? 1 : 0
-    if (aPenalty !== bPenalty) return aPenalty - bPenalty
-
-    // Faster first
-    const ad = a.transit_days ?? Number.POSITIVE_INFINITY
-    const bd = b.transit_days ?? Number.POSITIVE_INFINITY
-    return ad - bd
+  // For refresh, we still want determinism over a larger list.
+  // Create a “combined list” and slice 10 from offset.
+  const master = [...all].sort((a, b) => {
+    const ad = transitDays(a), bd = transitDays(b)
+    if (ad !== bd) return ad - bd
+    return centsValue(a) - centsValue(b)
   })
-}
 
-function parsePagination(q: any) {
-  const page = Math.max(1, Number(q?.page || 1))
-  const page_size = Math.min(100, Math.max(1, Number(q?.page_size || 20)))
-  const offset = (page - 1) * page_size
-  return { page, page_size, offset }
+  const pageSlice = master.slice(offset, offset + limit)
+  return { pageSlice, total: master.length }
 }
 
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   try {
     const orderId = req.params.id
-
-    // Medusa v2: use fields (explicit), NOT select/relations
     const query = req.scope.resolve<Query>("query")
+
+    // optional widget overrides
+    const body = (req.body || {}) as { package_overrides?: PackageOverrides; offset?: number; limit?: number }
+    const offset = Math.max(0, Number(body.offset ?? 0))
+    const limit = Math.min(10, Math.max(1, Number(body.limit ?? 10)))
 
     const { data } = await query.graph({
       entity: "order",
       fields: [
         "id",
         "email",
-
-        // shipping address
         "shipping_address.first_name",
         "shipping_address.last_name",
         "shipping_address.address_1",
@@ -336,12 +262,8 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
         "shipping_address.country_code",
         "shipping_address.postal_code",
         "shipping_address.company",
-
-        // items
         "items.title",
         "items.quantity",
-
-        // variant shipping fields
         "items.variant.weight",
         "items.variant.length",
         "items.variant.width",
@@ -355,9 +277,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
 
     const ship = order.shipping_address
     if (!ship?.postal_code || !ship?.country_code) {
-      return res.status(400).json({
-        message: "Order shipping address missing postal code / country.",
-      })
+      return res.status(400).json({ message: "Order shipping address missing postal code / country." })
     }
 
     const origin = {
@@ -377,8 +297,7 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     }
 
     const destination = {
-      name:
-        `${ship.first_name || ""} ${ship.last_name || ""}`.trim() || "Customer",
+      name: `${ship.first_name || ""} ${ship.last_name || ""}`.trim() || "Customer",
       address: {
         address_line_1: ship.address_1 || "",
         address_line_2: ship.address_2 || "",
@@ -393,28 +312,26 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       receives_email_updates: true,
     }
 
+    const { packages, debug, defaults } = buildFreightcomPackages(order, body.package_overrides)
+
     const payload = {
       details: {
         origin,
         destination,
         expected_ship_date: getExpectedShipDate(),
         packaging_type: "package",
-        packaging_properties: { packages: buildFreightcomPackages(order) },
+        packaging_properties: { packages },
       },
     }
 
-    // 1) Create rate request
+    // Create request
     const created = await freightcomRequest("/rate", { method: "POST", body: payload })
     const request_id = created?.request_id
-
     if (!request_id) {
-      return res.status(502).json({
-        message: "Freightcom did not return request_id.",
-        raw: created,
-      })
+      return res.status(502).json({ message: "Freightcom did not return request_id.", raw: created })
     }
 
-    // 2) Poll results briefly; if not ready, return 202 with request_id
+    // Poll briefly
     const MAX_WAIT_MS = Number(process.env.FREIGHTCOM_RATE_POLL_MAX_MS || 12000)
     const INTERVAL_MS = Number(process.env.FREIGHTCOM_RATE_POLL_INTERVAL_MS || 1000)
 
@@ -424,43 +341,45 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     while (Date.now() - started < MAX_WAIT_MS) {
       const raw = await freightcomRequest(`/rate/${request_id}`, { method: "GET" })
       lastRaw = raw
-
-      if (isRatesReadyFreightcom(raw)) break
+      if (raw?.status?.done && Array.isArray(raw?.rates)) break
       await sleep(INTERVAL_MS)
     }
 
-    if (!isRatesReadyFreightcom(lastRaw)) {
+    // Always return preview so widget can show non-zero details
+    const preview = {
+      origin,
+      destination,
+      package_defaults_used: defaults,
+      package_debug: debug,
+      packages_preview: packages.slice(0, 3), // don’t spam
+    }
+
+    if (!(lastRaw?.status?.done && Array.isArray(lastRaw?.rates))) {
       return res.status(202).json({
         request_id,
         status: "processing",
+        status_meta: lastRaw?.status,
+        preview,
       })
     }
 
-    // 3) Normalize, sort, paginate
-    const rawRates = (lastRaw?.rates || []) as FreightcomRate[]
-    const normalized = rawRates.map(normalizeFreightcomRate)
-    const sorted = sortRatesMajorFirst(normalized)
+    const allRates: FreightcomRate[] = lastRaw.rates
+    const { pageSlice, total } = smartTopRates(allRates, offset, limit)
 
-    const { page, page_size, offset } = parsePagination(req.query)
-    const paged = sorted.slice(offset, offset + page_size)
+    const next_offset = offset + limit >= total ? 0 : offset + limit
 
     return res.status(200).json({
       request_id,
       status: "ready",
-      status_meta: lastRaw?.status,
-      pagination: {
-        page,
-        page_size,
-        total: sorted.length,
-        total_pages: Math.max(1, Math.ceil(sorted.length / page_size)),
-      },
-      rates: paged,
-      raw: process.env.RETURN_FREIGHTCOM_RAW === "true" ? lastRaw : undefined,
+      status_meta: lastRaw.status,
+      preview,
+      rates: pageSlice,
+      rates_total: total,
+      offset,
+      limit,
+      next_offset,
     })
   } catch (e: any) {
-    return res.status(500).json({
-      message: e?.message || "Unknown error",
-    })
+    return res.status(500).json({ message: e?.message || "Unknown error" })
   }
 }
-
