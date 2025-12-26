@@ -171,6 +171,7 @@ const refreshPickup = async () => {
   await refreshOrder()
 }
 
+
   const order = orderQuery.data?.order ?? fallbackOrder
 
   // Single source of truth for shipment id
@@ -326,29 +327,18 @@ const shipmentStatusQuery = useQuery({
     setOffsetMeta({})
   }
 const headerBadge = useMemo(() => {
-  // Shipment exists → show shipment state
+  // Shipment exists
   if (shipmentIdFromMeta) {
-    if (shipmentStatusQuery.isPending) {
-      return <Badge size="small" color="orange">Shipment: loading…</Badge>
-    }
-    return (
-      <Badge size="small" color="green">
-        Shipment: {shipmentStatusQuery.data}
-      </Badge>
-    )
+    return <Badge size="small" color="green">Shipment booked</Badge>
   }
 
-  // Otherwise fall back to rates flow
-  if (!requestId) return <Badge size="small" color="grey">Not started</Badge>
-  if (done) return <Badge size="small" color="green">Ready</Badge>
-  return <Badge size="small" color="orange">Processing</Badge>
-}, [
-  shipmentIdFromMeta,
-  shipmentStatusQuery.isPending,
-  shipmentStatusQuery.data,
-  requestId,
-  done,
-])
+  // Rates flow still active
+  if (requestId && meta.status === "processing") {
+    return <Badge size="small" color="orange">Processing</Badge>
+  }
+
+  return <Badge size="small" color="grey">Not started</Badge>
+}, [shipmentIdFromMeta, requestId, meta.status])
 
   const ratesMutation = useMutation({
     mutationFn: async (vars: { offset: number; openModalOnReady?: boolean }) => {
@@ -461,8 +451,15 @@ const cancelPickup = useMutation({
   },
   onSuccess: async () => {
     // backend clears pickup metadata keys
-    await qc.invalidateQueries({ queryKey: ["admin-order", orderId] })
-    await qc.invalidateQueries({ queryKey: ["freightcom-pickup", orderId, shipmentIdFromMeta] })
+ setPickupDateISO(defaultShipDateISO())
+  setPickupLocation("Front desk")
+  setPickupContactName("Warehouse")
+  setPickupPhone("")
+
+  await qc.invalidateQueries({ queryKey: ["admin-order", orderId] })
+  await qc.invalidateQueries({
+    queryKey: ["freightcom-pickup", orderId, shipmentIdFromMeta],
+  })
   },
 })
   // Poll while processing
@@ -591,7 +588,15 @@ const cancelPickup = useMutation({
     (cancelShipment.error as any)?.message ||
     (shipmentQuery.error as any)?.message ||
     null
-
+const globalLoading =
+  orderQuery.isFetching ||
+  shipmentQuery.isFetching ||
+  pickupQuery.isFetching ||
+  ratesMutation.isPending ||
+  bookShipment.isPending ||
+  cancelShipment.isPending ||
+  schedulePickup.isPending ||
+  cancelPickup.isPending
   return (
     <Container className="divide-y p-0">
       <div className="flex items-start justify-between px-6 py-4 gap-4">
@@ -942,12 +947,16 @@ const cancelPickup = useMutation({
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <Button
+              <Button
   variant="secondary"
-  onClick={refreshShipment}
-  disabled={shipmentQuery.isPending}
+  disabled={globalLoading}
+  onClick={() =>
+    qc.invalidateQueries({
+      queryKey: ["freightcom-shipment", orderId, shipmentIdFromMeta],
+    })
+  }
 >
-  Refresh
+  {shipmentQuery.isFetching ? "Refreshing…" : "Refresh"}
 </Button>
 
                   <Button
@@ -1003,13 +1012,17 @@ const cancelPickup = useMutation({
               <Text size="small" className="text-ui-fg-subtle">Current pickup</Text>
 
               <div className="flex items-center gap-2">
-                <Button
+           <Button
   size="small"
   variant="secondary"
-  onClick={refreshPickup}
-  disabled={pickupQuery.isPending}
+  disabled={globalLoading}
+  onClick={() =>
+    qc.invalidateQueries({
+      queryKey: ["freightcom-pickup", orderId, shipmentIdFromMeta],
+    })
+  }
 >
-  {pickupQuery.isPending ? "Refreshing…" : "Refresh"}
+  {pickupQuery.isFetching ? "Refreshing…" : "Refresh"}
 </Button>
 
                 <Button
@@ -1035,9 +1048,12 @@ const cancelPickup = useMutation({
   </Text>
 ) : (
   <>
-    <Text className="font-medium mt-2">
-      Status: {pickupStatusFromMeta || pickupQuery.data?.status || "—"}
-    </Text>
+    <Text>
+  Status:{" "}
+  {pickupQuery.isFetching || cancelPickup.isPending
+    ? "Loading…"
+    : pickupStatusFromMeta || "Not scheduled"}
+</Text>
 
     <Text size="small" className="text-ui-fg-subtle">
       Confirmation: {pickupConfirmationFromMeta || pickupQuery.data?.pickup_confirmation_number || "—"}

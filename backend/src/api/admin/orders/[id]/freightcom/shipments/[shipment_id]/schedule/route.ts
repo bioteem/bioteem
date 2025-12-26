@@ -194,12 +194,14 @@ export const DELETE = async (req: MedusaRequest, res: MedusaResponse) => {
 
     const { meta } = await getOrderAndAssertShipment(req, orderId, shipmentId)
 
+    // Try cancelling on Freightcom, but DO NOT trust their status
     const r = await freightcomRequestSafe(`/shipment/${shipmentId}/schedule`, {
       method: "DELETE",
     })
 
     const orderModule = req.scope.resolve<IOrderModuleService>(Modules.ORDER)
 
+    // ALWAYS clear pickup metadata — even if Freightcom errors
     await orderModule.updateOrders(orderId, {
       metadata: {
         ...stripPickupMeta(meta),
@@ -207,17 +209,14 @@ export const DELETE = async (req: MedusaRequest, res: MedusaResponse) => {
       },
     })
 
-    if (!r.ok && r.status !== 404) {
-      throw new Error(`Freightcom ${r.status}: ${JSON.stringify(r.data)}`)
-    }
-
+    // Treat 200, 404, 500 as SUCCESS
     return res.status(200).json({
       cleared: true,
-      freightcom: r.ok ? r.data : { status: 404 },
+      freightcom_status: r.status,
     })
   } catch (e: any) {
-    return res
-      .status(e?.status || 500)
-      .json({ message: e?.message || "Unknown error", code: e?.code })
+    return res.status(500).json({
+      message: e?.message || "Unknown error",
+    })
   }
 }
