@@ -79,6 +79,7 @@ export default function SplitSection({
       )}
 
       <Heading
+      className="text-2xl md:text-3xl font-semibold tracking-tight"
         level="h2"
       >
         {title}
