@@ -57,22 +57,11 @@ async function freightcomRequest(path: string, opts?: { method?: string; body?: 
 }
 
 // ---------- units + conversions ----------
-function gToLb(g: number) {
-  return g / 453.59237
-}
-function gToKg(g: number) {
-  return g / 1000
-}
-function cmToIn(cm: number) {
-  return cm / 2.54
-}
-
-function round2(n: number) {
-  return Math.round(n * 100) / 100
-}
-function round1(n: number) {
-  return Math.round(n * 10) / 10
-}
+function gToLb(g: number) { return g / 453.59237 }
+function gToKg(g: number) { return g / 1000 }
+function cmToIn(cm: number) { return cm / 2.54 }
+function round2(n: number) { return Math.round(n * 100) / 100 }
+function round1(n: number) { return Math.round(n * 10) / 10 }
 
 type PackageOverrides = {
   unit_system?: "metric" | "imperial" // metric => cm/kg, imperial => in/lb
@@ -91,11 +80,7 @@ function buildFreightcomPackages(order: any, overrides?: PackageOverrides) {
   const DEFAULT_H_CM = Number(overrides?.default_h_cm ?? process.env.DEFAULT_ITEM_HEIGHT_CM ?? 10)
 
   const packages: any[] = []
-  let debug = {
-    total_items: 0,
-    used_defaults_for: 0,
-    sum_weight_g: 0,
-  }
+  const debug = { total_items: 0, used_defaults_for: 0, sum_weight_g: 0 }
 
   for (const item of order.items || []) {
     const qty = Math.max(1, Number(item.quantity || 1))
@@ -144,7 +129,6 @@ function buildFreightcomPackages(order: any, overrides?: PackageOverrides) {
   }
 
   if (packages.length === 0) {
-    // safe fallback
     const fallback = unitSystem === "metric"
       ? {
           description: "Default package",
@@ -163,10 +147,14 @@ function buildFreightcomPackages(order: any, overrides?: PackageOverrides) {
     packages.push(fallback)
   }
 
-  return { packages, debug, defaults: { DEFAULT_WEIGHT_G, DEFAULT_L_CM, DEFAULT_W_CM, DEFAULT_H_CM, unitSystem } }
+  return {
+    packages,
+    debug,
+    defaults: { DEFAULT_WEIGHT_G, DEFAULT_L_CM, DEFAULT_W_CM, DEFAULT_H_CM, unitSystem },
+  }
 }
 
-// ---------- rates selection (10 only + refresh offset) ----------
+// ---------- rates paging (10 only + cursor offset) ----------
 type FreightcomRate = {
   service_id: string
   total?: { value: string; currency: string }
@@ -185,57 +173,18 @@ function centsValue(rate: FreightcomRate) {
   const n = Number(rate?.total?.value ?? NaN)
   return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY
 }
-
 function transitDays(rate: FreightcomRate) {
   if (rate.transit_time_not_available) return Number.POSITIVE_INFINITY
   const n = Number(rate.transit_time_days ?? NaN)
   return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY
 }
 
-function smartTopRates(all: FreightcomRate[], offset: number, limit: number) {
-  const byCheapest = [...all].sort((a, b) => centsValue(a) - centsValue(b))
-  const byFastest = [...all].sort((a, b) => transitDays(a) - transitDays(b))
-
-  // union: 5 cheapest + 5 fastest => up to 10, then if still short, fill by a combined sort
-  const wantCheapest = Math.ceil(limit / 2)
-  const wantFastest = Math.floor(limit / 2)
-
-  const union: FreightcomRate[] = []
-  const seen = new Set<string>()
-
-  function add(r: FreightcomRate) {
-    const id = r.service_id || `${r.carrier_name}-${r.service_name}`
-    if (!id || seen.has(id)) return
-    seen.add(id)
-    union.push(r)
-  }
-
-  byCheapest.slice(0, wantCheapest + offset).slice(offset).forEach(add)
-  byFastest.slice(0, wantFastest + offset).slice(offset).forEach(add)
-
-  // If union short, fill from combined “fast then cheap”
-  if (union.length < limit) {
-    const combined = [...all].sort((a, b) => {
-      const ad = transitDays(a), bd = transitDays(b)
-      if (ad !== bd) return ad - bd
-      return centsValue(a) - centsValue(b)
-    })
-    for (const r of combined) {
-      add(r)
-      if (union.length >= limit) break
-    }
-  }
-
-  // For refresh, we still want determinism over a larger list.
-  // Create a “combined list” and slice 10 from offset.
-  const master = [...all].sort((a, b) => {
+function smartMasterSort(all: FreightcomRate[]) {
+  return [...all].sort((a, b) => {
     const ad = transitDays(a), bd = transitDays(b)
     if (ad !== bd) return ad - bd
     return centsValue(a) - centsValue(b)
   })
-
-  const pageSlice = master.slice(offset, offset + limit)
-  return { pageSlice, total: master.length }
 }
 
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
@@ -243,8 +192,13 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     const orderId = req.params.id
     const query = req.scope.resolve<Query>("query")
 
-    // optional widget overrides
-    const body = (req.body || {}) as { package_overrides?: PackageOverrides; offset?: number; limit?: number }
+    const body = (req.body || {}) as {
+      package_overrides?: PackageOverrides
+      offset?: number
+      limit?: number
+      expected_ship_date_override?: { year: number; month: number; day: number }
+    }
+
     const offset = Math.max(0, Number(body.offset ?? 0))
     const limit = Math.min(10, Math.max(1, Number(body.limit ?? 10)))
 
@@ -312,26 +266,25 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       receives_email_updates: true,
     }
 
+    const expected_ship_date = body.expected_ship_date_override ?? getExpectedShipDate()
     const { packages, debug, defaults } = buildFreightcomPackages(order, body.package_overrides)
 
     const payload = {
       details: {
         origin,
         destination,
-        expected_ship_date: getExpectedShipDate(),
+        expected_ship_date,
         packaging_type: "package",
         packaging_properties: { packages },
       },
     }
 
-    // Create request
     const created = await freightcomRequest("/rate", { method: "POST", body: payload })
     const request_id = created?.request_id
     if (!request_id) {
       return res.status(502).json({ message: "Freightcom did not return request_id.", raw: created })
     }
 
-    // Poll briefly
     const MAX_WAIT_MS = Number(process.env.FREIGHTCOM_RATE_POLL_MAX_MS || 12000)
     const INTERVAL_MS = Number(process.env.FREIGHTCOM_RATE_POLL_INTERVAL_MS || 1000)
 
@@ -345,13 +298,13 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       await sleep(INTERVAL_MS)
     }
 
-    // Always return preview so widget can show non-zero details
     const preview = {
       origin,
       destination,
+      expected_ship_date,
       package_defaults_used: defaults,
       package_debug: debug,
-      packages_preview: packages.slice(0, 3), // don’t spam
+      packages_preview: packages.slice(0, 3),
     }
 
     if (!(lastRaw?.status?.done && Array.isArray(lastRaw?.rates))) {
@@ -364,8 +317,10 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     }
 
     const allRates: FreightcomRate[] = lastRaw.rates
-    const { pageSlice, total } = smartTopRates(allRates, offset, limit)
+    const master = smartMasterSort(allRates)
 
+    const pageSlice = master.slice(offset, offset + limit)
+    const total = master.length
     const next_offset = offset + limit >= total ? 0 : offset + limit
 
     return res.status(200).json({

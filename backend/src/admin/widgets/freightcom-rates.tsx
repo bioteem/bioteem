@@ -24,14 +24,13 @@ type FreightcomRate = {
   transit_time_not_available?: boolean
   valid_until?: JsonDate
   paperless?: boolean
-  surcharges?: any[]
-  taxes?: any[]
   [k: string]: any
 }
 
 type Preview = {
   origin: any
   destination: any
+  expected_ship_date?: JsonDate
   package_defaults_used?: any
   package_debug?: any
   packages_preview?: any[]
@@ -58,6 +57,10 @@ type ProcessingResp = {
 
 type PostResp = ReadyResp | ProcessingResp
 
+type PaymentMethodsResp = {
+  methods: { id: string; label: string }[]
+}
+
 function getOrderFromWidgetData(data: any) {
   return data?.order ?? data?.resource ?? data ?? null
 }
@@ -69,38 +72,56 @@ function formatJsonDate(d?: JsonDate) {
   return `${d.year}-${mm}-${dd}`
 }
 
-// cents-as-string
 function moneyLabel(m?: Money) {
   if (!m?.value) return "—"
   const cents = Number(m.value)
-  if (Number.isFinite(cents)) {
-    return `${(Math.round(cents) / 100).toFixed(2)} ${m.currency || ""}`.trim()
-  }
+  if (Number.isFinite(cents)) return `${(Math.round(cents) / 100).toFixed(2)} ${m.currency || ""}`.trim()
   return `${m.value} ${m.currency || ""}`.trim()
+}
+
+function toJsonDate(iso: string): JsonDate {
+  const [y, m, d] = iso.split("-").map((x) => Number(x))
+  return { year: y, month: m, day: d }
+}
+
+function defaultShipDateISO() {
+  const d = new Date()
+  if (d.getHours() >= 16) d.setDate(d.getDate() + 1)
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1)
+  const yyyy = d.getFullYear()
+  const mm = String(d.getMonth() + 1).padStart(2, "0")
+  const dd = String(d.getDate()).padStart(2, "0")
+  return `${yyyy}-${mm}-${dd}`
 }
 
 export default function FreightcomRatesWidget({ data }: any) {
   const order = getOrderFromWidgetData(data)
   const orderId = order?.id
 
-  // Package override fields
+  // Package defaults
   const [unitSystem, setUnitSystem] = useState<"metric" | "imperial">("metric")
   const [defWeightG, setDefWeightG] = useState(500)
   const [defLCm, setDefLCm] = useState(20)
   const [defWCm, setDefWCm] = useState(15)
   const [defHCm, setDefHCm] = useState(10)
 
-  // modal / selection
+  // Ship date selection
+  const [shipDateISO, setShipDateISO] = useState<string>(() => defaultShipDateISO())
+
+  // Modal / stepper
   const [isModalOpen, setIsModalOpen] = useState(false)
+  const [step, setStep] = useState<1 | 2>(1)
+
+  // Selection
   const [selectedServiceId, setSelectedServiceId] = useState<string | null>(null)
 
-  // Keep pages locally so refresh doesn't lose old options
+  // Page caching
   const [pages, setPages] = useState<FreightcomRate[][]>([])
+  const [cursorOffsets, setCursorOffsets] = useState<number[]>([0])
   const [pageIndex, setPageIndex] = useState(0)
 
-  // Tracking backend cursor
-  const [cursorOffsets, setCursorOffsets] = useState<number[]>([0]) // offsets per page
-  const [respMeta, setRespMeta] = useState<{
+  // Response meta
+  const [meta, setMeta] = useState<{
     request_id: string | null
     status: "idle" | "processing" | "ready"
     status_meta?: any
@@ -109,14 +130,18 @@ export default function FreightcomRatesWidget({ data }: any) {
     next_offset?: number
   }>({ request_id: null, status: "idle" })
 
-  const requestId = respMeta.request_id
-  const done = respMeta.status === "ready"
+  const requestId = meta.request_id
+  const done = meta.status === "ready"
+  const currentRates = pages[pageIndex] || []
+
+  // Payment methods
+  const [paymentMethods, setPaymentMethods] = useState<{ id: string; label: string }[]>([])
+  const [paymentMethodId, setPaymentMethodId] = useState<string | null>(null)
 
   const ship = order?.shipping_address
   const destinationPreview = useMemo(() => {
     return {
-      name:
-        `${ship?.first_name || ""} ${ship?.last_name || ""}`.trim() || "Customer",
+      name: `${ship?.first_name || ""} ${ship?.last_name || ""}`.trim() || "Customer",
       address: {
         address_line_1: ship?.address_1 || "—",
         address_line_2: ship?.address_2 || "",
@@ -136,11 +161,8 @@ export default function FreightcomRatesWidget({ data }: any) {
     return <Badge size="small" color="orange">Processing</Badge>
   }, [requestId, done])
 
-  const currentRates = pages[pageIndex] || []
-
   const selectedRate = useMemo(() => {
     if (!selectedServiceId) return null
-    // search all pages so selection stays consistent
     for (const p of pages) {
       const r = p.find((x) => x.service_id === selectedServiceId)
       if (r) return r
@@ -148,13 +170,14 @@ export default function FreightcomRatesWidget({ data }: any) {
     return null
   }, [pages, selectedServiceId])
 
-  const callRates = useMutation({
+  const ratesMutation = useMutation({
     mutationFn: async (vars: { offset: number; openModalOnReady?: boolean }) => {
       if (!orderId) throw new Error("Missing orderId")
 
       const body = {
         offset: vars.offset,
         limit: 10,
+        expected_ship_date_override: toJsonDate(shipDateISO),
         package_overrides: {
           unit_system: unitSystem,
           default_weight_g: defWeightG,
@@ -170,94 +193,136 @@ export default function FreightcomRatesWidget({ data }: any) {
       })
     },
     onSuccess: (r: PostResp, vars) => {
-      setRespMeta((prev) => ({
+      setMeta({
         request_id: r.request_id,
         status: r.status === "ready" ? "ready" : "processing",
         status_meta: (r as any).status_meta,
         preview: (r as any).preview,
         rates_total: (r as any).rates_total,
         next_offset: (r as any).next_offset,
-      }))
+      })
 
       if (r.status === "ready") {
         const pageRates = (r.rates || []) as FreightcomRate[]
+        const offset = vars.offset
 
-        // if this offset already exists in cursorOffsets, replace that page
+        // update/append page by offset
         setPages((prev) => {
-          const idx = cursorOffsets.indexOf(vars.offset)
+          const idx = cursorOffsets.indexOf(offset)
           if (idx >= 0) {
             const copy = [...prev]
             copy[idx] = pageRates
             return copy
           }
-          // else append a new page
           return [...prev, pageRates]
         })
 
-        setCursorOffsets((prev) => {
-          if (prev.includes(vars.offset)) return prev
-          return [...prev, vars.offset]
-        })
+        setCursorOffsets((prev) => (prev.includes(offset) ? prev : [...prev, offset]))
 
-        // set current page index to the page for this offset
+        // move to page for this offset
         setPageIndex(() => {
-          const idx = cursorOffsets.indexOf(vars.offset)
+          const idx = cursorOffsets.indexOf(offset)
           if (idx >= 0) return idx
-          return cursorOffsets.length // it will be appended
+          return cursorOffsets.length
         })
 
-        // select first option if nothing selected
-        if (!selectedServiceId && pageRates.length) {
-          setSelectedServiceId(pageRates[0].service_id)
-        }
+        // default select first if none
+        if (!selectedServiceId && pageRates.length) setSelectedServiceId(pageRates[0].service_id)
 
-        if (vars.openModalOnReady) setIsModalOpen(true)
+        if (vars.openModalOnReady) {
+          setStep(1)
+          setIsModalOpen(true)
+        }
       } else {
-        // keep modal closed while processing
         setIsModalOpen(false)
       }
     },
   })
 
-  // Poll while processing (stay on offset 0)
+  // Poll while processing
   useEffect(() => {
-    if (respMeta.status !== "processing") return
-    let cancelled = false
+    if (meta.status !== "processing") return
     const t = setTimeout(() => {
-      if (!cancelled) callRates.mutate({ offset: 0, openModalOnReady: true })
+      ratesMutation.mutate({ offset: 0, openModalOnReady: true })
     }, 1200)
-    return () => {
-      cancelled = true
-      clearTimeout(t)
-    }
+    return () => clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [respMeta.status])
+  }, [meta.status])
 
   const startGetRates = () => {
-    // reset pages for a new "session"
     setPages([])
     setCursorOffsets([0])
     setPageIndex(0)
     setSelectedServiceId(null)
-    setRespMeta({ request_id: null, status: "idle" })
-
-    callRates.mutate({ offset: 0, openModalOnReady: true })
+    setPaymentMethods([])
+    setPaymentMethodId(null)
+    setMeta({ request_id: null, status: "idle" })
+    setStep(1)
+    ratesMutation.mutate({ offset: 0, openModalOnReady: true })
   }
 
-  const goNext = () => {
+  // ✅ FIXED Next: prefer cached next page; otherwise fetch
+  const goNextRatesPage = () => {
     if (!done) return
-    const nextOffset = respMeta.next_offset ?? 0
-    // If nextOffset already loaded, just move
-    const idx = cursorOffsets.indexOf(nextOffset)
-    if (idx >= 0) {
-      setPageIndex(idx)
+    const nextIndex = pageIndex + 1
+    if (nextIndex < pages.length) {
+      setPageIndex(nextIndex)
       return
     }
-    callRates.mutate({ offset: nextOffset, openModalOnReady: true })
+
+    const nextOffset = meta.next_offset ?? 0
+    const existingIdx = cursorOffsets.indexOf(nextOffset)
+    if (existingIdx >= 0) {
+      setPageIndex(existingIdx)
+      return
+    }
+
+    ratesMutation.mutate({ offset: nextOffset, openModalOnReady: true })
   }
 
-  const goPrev = () => {
-    setPageIndex((p) => Math.max(0, p - 1))
+  const goPrevRatesPage = () => setPageIndex((p) => Math.max(0, p - 1))
+
+  const loadPaymentMethods = useMutation({
+    mutationFn: async () => {
+      if (!orderId) throw new Error("Missing orderId")
+      return sdk.client.fetch<PaymentMethodsResp>(
+        `/admin/orders/${orderId}/freightcom/payment-methods`
+      )
+    },
+    onSuccess: (r) => {
+      setPaymentMethods(r.methods || [])
+      setPaymentMethodId((prev) => prev ?? r.methods?.[0]?.id ?? null)
+    },
+  })
+
+  const bookShipment = useMutation({
+    mutationFn: async () => {
+      if (!orderId) throw new Error("Missing orderId")
+      if (!selectedRate?.service_id) throw new Error("Select a rate")
+      if (!paymentMethodId) throw new Error("Select a payment method")
+
+      return sdk.client.fetch(`/admin/orders/${orderId}/freightcom/shipments`, {
+        method: "POST",
+        body: {
+          service_id: selectedRate.service_id,
+          payment_method_id: paymentMethodId,
+          expected_ship_date: toJsonDate(shipDateISO),
+          package_overrides: {
+            unit_system: unitSystem,
+            default_weight_g: defWeightG,
+            default_l_cm: defLCm,
+            default_w_cm: defWCm,
+            default_h_cm: defHCm,
+          },
+        },
+      })
+    },
+  })
+
+  const goToStep2 = async () => {
+    if (!selectedRate?.service_id) return
+    await loadPaymentMethods.mutateAsync()
+    setStep(2)
   }
 
   return (
@@ -266,35 +331,37 @@ export default function FreightcomRatesWidget({ data }: any) {
         <div className="min-w-0">
           <Heading level="h2">Freightcom Rates</Heading>
           <Text size="small" className="text-ui-fg-subtle">
-            Get top shipping options (10 at a time). Use Next/Prev to page through.
+            Step 1: choose a rate • Step 2: choose payment + book shipment.
           </Text>
-
           <div className="mt-2 flex items-center gap-2 flex-wrap">
             {headerBadge}
             {requestId ? (
-              <Text size="small" className="text-ui-fg-subtle break-all">
-                Request: {requestId}
-              </Text>
+              <Text size="small" className="text-ui-fg-subtle break-all">Request: {requestId}</Text>
             ) : null}
-            {respMeta.status_meta ? (
+            {meta.status_meta ? (
               <Text size="small" className="text-ui-fg-subtle">
-                {respMeta.status_meta.complete}/{respMeta.status_meta.total} complete
+                {meta.status_meta.complete}/{meta.status_meta.total} complete
               </Text>
             ) : null}
           </div>
         </div>
 
         <div className="flex items-center gap-2">
-          <Button onClick={startGetRates} disabled={!orderId || callRates.isPending}>
-            {callRates.isPending ? "Working…" : "Get Rates"}
+          <Button onClick={startGetRates} disabled={!orderId || ratesMutation.isPending}>
+            {ratesMutation.isPending ? "Working…" : "Get Rates"}
           </Button>
         </div>
       </div>
 
       <div className="px-6 py-4 space-y-3">
-        {callRates.isError && (
+        {(ratesMutation.isError || loadPaymentMethods.isError || bookShipment.isError) && (
           <Text size="small" className="text-ui-fg-error">
-            {String((callRates.error as any)?.message || "Error")}
+            {String(
+              (ratesMutation.error as any)?.message ||
+                (loadPaymentMethods.error as any)?.message ||
+                (bookShipment.error as any)?.message ||
+                "Error"
+            )}
           </Text>
         )}
 
@@ -311,32 +378,46 @@ export default function FreightcomRatesWidget({ data }: any) {
               <Text size="xsmall" className="text-ui-fg-subtle">Address</Text>
               <Text size="small">{destinationPreview.address.address_line_1}</Text>
               <Text size="small" className="text-ui-fg-subtle">
-                {destinationPreview.address.city}, {destinationPreview.address.region}{" "}
-                {destinationPreview.address.postal_code}
+                {destinationPreview.address.city}, {destinationPreview.address.region} {destinationPreview.address.postal_code}
               </Text>
-              <Text size="small" className="text-ui-fg-subtle">
-                {destinationPreview.address.country}
-              </Text>
+              <Text size="small" className="text-ui-fg-subtle">{destinationPreview.address.country}</Text>
             </div>
           </div>
         </div>
 
-        {/* Package override fields */}
+        {/* Ship date + defaults */}
         <div className="rounded-md border border-ui-border-base p-3 space-y-3">
-          <Text size="small" className="text-ui-fg-subtle">
-            Package defaults (used when variant dims/weight are missing)
-          </Text>
+          <Text size="small" className="text-ui-fg-subtle">Shipment settings</Text>
 
-          <div className="flex items-center gap-3 flex-wrap">
-            <label className="flex items-center gap-2 text-sm">
-              <input type="radio" checked={unitSystem === "metric"} onChange={() => setUnitSystem("metric")} />
-              Metric (cm/kg)
-            </label>
-            <label className="flex items-center gap-2 text-sm">
-              <input type="radio" checked={unitSystem === "imperial"} onChange={() => setUnitSystem("imperial")} />
-              Imperial (in/lb)
-            </label>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+            <div>
+              <Text size="xsmall" className="text-ui-fg-subtle">Expected ship date</Text>
+              <input
+                type="date"
+                className="w-full border rounded px-2 py-1"
+                value={shipDateISO}
+                onChange={(e) => setShipDateISO(e.target.value)}
+              />
+            </div>
+
+            <div className="md:col-span-2">
+              <Text size="xsmall" className="text-ui-fg-subtle">Units</Text>
+              <div className="flex items-center gap-3 flex-wrap mt-1">
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="radio" checked={unitSystem === "metric"} onChange={() => setUnitSystem("metric")} />
+                  Metric (cm/kg)
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="radio" checked={unitSystem === "imperial"} onChange={() => setUnitSystem("imperial")} />
+                  Imperial (in/lb)
+                </label>
+              </div>
+            </div>
           </div>
+
+          <Text size="xsmall" className="text-ui-fg-subtle">
+            Package defaults used when variant dims/weight are missing
+          </Text>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
             <div>
@@ -360,17 +441,16 @@ export default function FreightcomRatesWidget({ data }: any) {
 
         {/* Backend preview (after click) */}
         <div className="rounded-md border border-ui-border-base p-3">
-          <Text size="small" className="text-ui-fg-subtle">Backend preview (what will be sent)</Text>
-          {!respMeta.preview ? (
+          <Text size="small" className="text-ui-fg-subtle">Backend preview (generated after Get Rates)</Text>
+          {!meta.preview ? (
             <Text size="small" className="text-ui-fg-subtle mt-2">
-              Click <span className="font-medium">Get Rates</span> to generate the full payload preview.
+              Click <span className="font-medium">Get Rates</span> to generate payload preview.
             </Text>
           ) : (
             <pre className="text-xs mt-2 p-2 bg-ui-bg-subtle rounded overflow-auto max-h-48">
-{JSON.stringify(respMeta.preview, null, 2)}
+{JSON.stringify(meta.preview, null, 2)}
             </pre>
           )}
-
           {requestId && !done && (
             <Text size="small" className="text-ui-fg-subtle mt-2">
               Processing… modal will open automatically when ready.
@@ -384,30 +464,11 @@ export default function FreightcomRatesWidget({ data }: any) {
         <FocusModal.Content className="h-[95vh] w-[95vw] max-w-none overflow-hidden">
           <FocusModal.Header>
             <div className="flex items-center justify-between w-full">
-              <Heading level="h2">Shipping Options</Heading>
+              <Heading level="h2">
+                {step === 1 ? "Step 1 — Select Rate" : "Step 2 — Payment + Book"}
+              </Heading>
 
               <div className="flex items-center gap-2">
-                <Text size="small" className="text-ui-fg-subtle">
-                  Page {pageIndex + 1} / {Math.max(1, pages.length)}
-                </Text>
-
-                <Button
-                  size="small"
-                  variant="secondary"
-                  onClick={goPrev}
-                  disabled={pageIndex === 0 || callRates.isPending}
-                >
-                  Prev
-                </Button>
-                <Button
-                  size="small"
-                  variant="secondary"
-                  onClick={goNext}
-                  disabled={!done || callRates.isPending}
-                >
-                  Next
-                </Button>
-
                 <FocusModal.Close asChild>
                   <Button size="small" variant="secondary">Close</Button>
                 </FocusModal.Close>
@@ -416,9 +477,18 @@ export default function FreightcomRatesWidget({ data }: any) {
           </FocusModal.Header>
 
           <FocusModal.Body className="p-6 overflow-y-auto h-[calc(95vh-64px)]">
-            {/* Selected on top */}
+            {/* Stepper */}
+            <div className="flex items-center gap-2 mb-4">
+              <Badge size="small" color={step === 1 ? "blue" : "grey"}>1</Badge>
+              <Text size="small" className={step === 1 ? "" : "text-ui-fg-subtle"}>Rate</Text>
+              <Text size="small" className="text-ui-fg-subtle">→</Text>
+              <Badge size="small" color={step === 2 ? "blue" : "grey"}>2</Badge>
+              <Text size="small" className={step === 2 ? "" : "text-ui-fg-subtle"}>Payment</Text>
+            </div>
+
+            {/* Selected pinned */}
             <div className="mb-4 rounded-md border border-ui-border-base p-3">
-              <Text size="small" className="text-ui-fg-subtle">Selected</Text>
+              <Text size="small" className="text-ui-fg-subtle">Selected rate</Text>
               {selectedRate ? (
                 <>
                   <Text className="font-medium">
@@ -431,81 +501,163 @@ export default function FreightcomRatesWidget({ data }: any) {
                   </Text>
                 </>
               ) : (
-                <Text size="small" className="text-ui-fg-subtle">Pick one of the options below.</Text>
+                <Text size="small" className="text-ui-fg-subtle">Pick one below.</Text>
               )}
             </div>
 
-            {!done ? (
-              <Text size="small" className="text-ui-fg-subtle">Processing…</Text>
-            ) : currentRates.length === 0 ? (
-              <Text size="small" className="text-ui-fg-subtle">No rates returned.</Text>
-            ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                {currentRates.map((r) => {
-                  const isSelected = selectedServiceId === r.service_id
-                  return (
-                    <button
-                      key={r.service_id}
-                      type="button"
-                      onClick={() => setSelectedServiceId(r.service_id)}
-                      className={[
-                        "text-left rounded-md border p-3 transition w-full",
-                        isSelected
-                          ? "border-ui-fg-base bg-ui-bg-base"
-                          : "border-ui-border-base hover:border-ui-fg-subtle",
-                      ].join(" ")}
+            {/* STEP 1 */}
+            {step === 1 && (
+              <>
+                <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <Text size="small" className="text-ui-fg-subtle">
+                      Page {pageIndex + 1} / {Math.max(1, pages.length)} • Showing {currentRates.length} / {meta.rates_total ?? "?"}
+                    </Text>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="small"
+                      variant="secondary"
+                      onClick={goPrevRatesPage}
+                      disabled={pageIndex === 0 || ratesMutation.isPending}
                     >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <Text className="font-medium">
-                            {(r.carrier_name || "Carrier")} • {(r.service_name || r.service_id)}
-                          </Text>
-                          <Text size="small" className="text-ui-fg-subtle break-all">
-                            {r.service_id}
-                          </Text>
-                        </div>
-                        {r.paperless ? (
-                          <Badge size="small" color="green">Paperless</Badge>
-                        ) : (
-                          <Badge size="small" color="grey">Std</Badge>
-                        )}
-                      </div>
+                      Prev
+                    </Button>
+                    <Button
+                      size="small"
+                      variant="secondary"
+                      onClick={goNextRatesPage}
+                      disabled={!done || ratesMutation.isPending}
+                    >
+                      Next
+                    </Button>
 
-                      <div className="mt-2 grid grid-cols-3 gap-2">
-                        <div className="rounded border border-ui-border-base p-2">
-                          <Text size="xsmall" className="text-ui-fg-subtle">Total</Text>
-                          <Text className="font-medium">{moneyLabel(r.total)}</Text>
-                          <Text size="xsmall" className="text-ui-fg-subtle">
-                            Base: {moneyLabel(r.base)}
-                          </Text>
-                        </div>
+                    <Button
+                      size="small"
+                      onClick={goToStep2}
+                      disabled={!selectedRate || loadPaymentMethods.isPending}
+                    >
+                      {loadPaymentMethods.isPending ? "Loading…" : "Continue"}
+                    </Button>
+                  </div>
+                </div>
 
-                        <div className="rounded border border-ui-border-base p-2">
-                          <Text size="xsmall" className="text-ui-fg-subtle">Transit</Text>
-                          <Text className="font-medium">
-                            {r.transit_time_not_available ? "N/A" : `${r.transit_time_days} days`}
-                          </Text>
-                          <Text size="xsmall" className="text-ui-fg-subtle">
-                            Valid: {formatJsonDate(r.valid_until)}
-                          </Text>
-                        </div>
+                {!done ? (
+                  <Text size="small" className="text-ui-fg-subtle">Processing…</Text>
+                ) : currentRates.length === 0 ? (
+                  <Text size="small" className="text-ui-fg-subtle">No rates returned.</Text>
+                ) : (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                    {currentRates.map((r) => {
+                      const isSelected = selectedServiceId === r.service_id
+                      return (
+                        <button
+                          key={r.service_id}
+                          type="button"
+                          onClick={() => setSelectedServiceId(r.service_id)}
+                          className={[
+                            "text-left rounded-md border p-3 transition w-full",
+                            isSelected
+                              ? "border-ui-fg-base bg-ui-bg-base"
+                              : "border-ui-border-base hover:border-ui-fg-subtle",
+                          ].join(" ")}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <Text className="font-medium">
+                                {(r.carrier_name || "Carrier")} • {(r.service_name || r.service_id)}
+                              </Text>
+                              <Text size="small" className="text-ui-fg-subtle break-all">{r.service_id}</Text>
+                            </div>
+                            {r.paperless ? (
+                              <Badge size="small" color="green">Paperless</Badge>
+                            ) : (
+                              <Badge size="small" color="grey">Std</Badge>
+                            )}
+                          </div>
 
-                        <div className="rounded border border-ui-border-base p-2">
-                          <Text size="xsmall" className="text-ui-fg-subtle">Pool</Text>
-                          <Text size="small" className="text-ui-fg-subtle">
-                            Showing {currentRates.length} / {respMeta.rates_total ?? "?"}
-                          </Text>
-                        </div>
-                      </div>
-                    </button>
-                  )
-                })}
-              </div>
+                          <div className="mt-2 grid grid-cols-2 gap-2">
+                            <div className="rounded border border-ui-border-base p-2">
+                              <Text size="xsmall" className="text-ui-fg-subtle">Total</Text>
+                              <Text className="font-medium">{moneyLabel(r.total)}</Text>
+                              <Text size="xsmall" className="text-ui-fg-subtle">Base: {moneyLabel(r.base)}</Text>
+                            </div>
+                            <div className="rounded border border-ui-border-base p-2">
+                              <Text size="xsmall" className="text-ui-fg-subtle">Transit</Text>
+                              <Text className="font-medium">
+                                {r.transit_time_not_available ? "N/A" : `${r.transit_time_days} days`}
+                              </Text>
+                              <Text size="xsmall" className="text-ui-fg-subtle">Valid: {formatJsonDate(r.valid_until)}</Text>
+                            </div>
+                          </div>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </>
             )}
 
-            <Text size="xsmall" className="text-ui-fg-subtle mt-6">
-              Next step (creating shipment/label) will be wired after selection.
-            </Text>
+            {/* STEP 2 */}
+            {step === 2 && (
+              <div className="space-y-4">
+                <div className="rounded-md border border-ui-border-base p-3">
+                  <Text size="small" className="text-ui-fg-subtle">Payment method</Text>
+
+                  {paymentMethods.length === 0 ? (
+                    <Text size="small" className="text-ui-fg-subtle mt-2">
+                      No payment methods returned.
+                    </Text>
+                  ) : (
+                    <div className="mt-2 space-y-2">
+                      {paymentMethods.map((m) => (
+                        <label key={m.id} className="flex items-center gap-2 text-sm">
+                          <input
+                            type="radio"
+                            checked={paymentMethodId === m.id}
+                            onChange={() => setPaymentMethodId(m.id)}
+                          />
+                          {m.label} <span className="text-ui-fg-subtle">({m.id})</span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-md border border-ui-border-base p-3">
+                  <Text size="small" className="text-ui-fg-subtle">Confirm expected ship date</Text>
+                  <Text size="small" className="mt-1">
+                    {shipDateISO} (sent as {JSON.stringify(toJsonDate(shipDateISO))})
+                  </Text>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="secondary"
+                    onClick={() => setStep(1)}
+                  >
+                    Back
+                  </Button>
+
+                  <Button
+                    onClick={() => bookShipment.mutate()}
+                    disabled={!selectedRate || !paymentMethodId || bookShipment.isPending}
+                  >
+                    {bookShipment.isPending ? "Booking…" : "Book Shipment"}
+                  </Button>
+                </div>
+
+                {bookShipment.isSuccess && (
+                  <div className="rounded-md border border-ui-border-base p-3">
+                    <Text className="font-medium">Shipment booked</Text>
+                    <Text size="small" className="text-ui-fg-subtle mt-1">
+                      Backend returned data (check logs / response).
+                    </Text>
+                  </div>
+                )}
+              </div>
+            )}
           </FocusModal.Body>
         </FocusModal.Content>
       </FocusModal>
