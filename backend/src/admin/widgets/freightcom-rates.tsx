@@ -1,13 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import { defineWidgetConfig } from "@medusajs/admin-sdk"
-import {
-  Container,
-  Heading,
-  Button,
-  Text,
-  Badge,
-  FocusModal,
-} from "@medusajs/ui"
+import { Container, Heading, Button, Text, Badge, FocusModal } from "@medusajs/ui"
 import { useMutation } from "@tanstack/react-query"
 import { sdk } from "../lib/sdk"
 
@@ -61,6 +54,15 @@ type PaymentMethodsResp = {
   methods: { id: string; label: string }[]
 }
 
+type BookShipmentResp = {
+  shipment_id: string
+  previously_created?: boolean
+  shipment?: any
+  tracking_url?: string | null
+  tracking_number?: string | null
+  label_url?: string | null
+}
+
 function getOrderFromWidgetData(data: any) {
   return data?.order ?? data?.resource ?? data ?? null
 }
@@ -94,6 +96,14 @@ function defaultShipDateISO() {
   return `${yyyy}-${mm}-${dd}`
 }
 
+function pickLabelUrlFromShipment(shipment: any): string | null {
+  const labels = shipment?.labels
+  if (Array.isArray(labels) && labels.length) {
+    return labels[0]?.url || null
+  }
+  return shipment?.label_url || null
+}
+
 export default function FreightcomRatesWidget({ data }: any) {
   const order = getOrderFromWidgetData(data)
   const orderId = order?.id
@@ -109,7 +119,7 @@ export default function FreightcomRatesWidget({ data }: any) {
   const [shipDateISO, setShipDateISO] = useState<string>(() => defaultShipDateISO())
 
   // Modal / stepper
-  const [isModalOpen, setIsModalOpen] = useState(false)
+  const [isRatesModalOpen, setIsRatesModalOpen] = useState(false)
   const [step, setStep] = useState<1 | 2>(1)
 
   // Selection
@@ -137,6 +147,11 @@ export default function FreightcomRatesWidget({ data }: any) {
   // Payment methods
   const [paymentMethods, setPaymentMethods] = useState<{ id: string; label: string }[]>([])
   const [paymentMethodId, setPaymentMethodId] = useState<string | null>(null)
+
+  // Shipment modal
+  const [isShipmentModalOpen, setIsShipmentModalOpen] = useState(false)
+  const [shipmentId, setShipmentId] = useState<string | null>(null)
+  const [shipmentDetails, setShipmentDetails] = useState<any | null>(null)
 
   const ship = order?.shipping_address
   const destinationPreview = useMemo(() => {
@@ -206,35 +221,37 @@ export default function FreightcomRatesWidget({ data }: any) {
         const pageRates = (r.rates || []) as FreightcomRate[]
         const offset = vars.offset
 
-        // update/append page by offset
-        setPages((prev) => {
-          const idx = cursorOffsets.indexOf(offset)
-          if (idx >= 0) {
-            const copy = [...prev]
-            copy[idx] = pageRates
-            return copy
-          }
-          return [...prev, pageRates]
+        // ✅ IMPORTANT: do not use stale cursorOffsets here
+        setPages((prevPages) => {
+          // we'll update after we know index via setCursorOffsets
+          return prevPages
         })
 
-        setCursorOffsets((prev) => (prev.includes(offset) ? prev : [...prev, offset]))
+        setCursorOffsets((prevOffsets) => {
+          const idx = prevOffsets.indexOf(offset)
+          const nextOffsets = idx >= 0 ? prevOffsets : [...prevOffsets, offset]
 
-        // move to page for this offset
-        setPageIndex(() => {
-          const idx = cursorOffsets.indexOf(offset)
-          if (idx >= 0) return idx
-          return cursorOffsets.length
+          setPages((prevPages) => {
+            const nextPages = [...prevPages]
+            const pageIdx = idx >= 0 ? idx : nextOffsets.length - 1
+            nextPages[pageIdx] = pageRates
+            return nextPages
+          })
+
+          // move to page index
+          setPageIndex(idx >= 0 ? idx : nextOffsets.length - 1)
+
+          return nextOffsets
         })
 
-        // default select first if none
         if (!selectedServiceId && pageRates.length) setSelectedServiceId(pageRates[0].service_id)
 
         if (vars.openModalOnReady) {
           setStep(1)
-          setIsModalOpen(true)
+          setIsRatesModalOpen(true)
         }
       } else {
-        setIsModalOpen(false)
+        setIsRatesModalOpen(false)
       }
     },
   })
@@ -249,7 +266,7 @@ export default function FreightcomRatesWidget({ data }: any) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meta.status])
 
-  const startGetRates = () => {
+  const resetRateFlow = () => {
     setPages([])
     setCursorOffsets([0])
     setPageIndex(0)
@@ -258,10 +275,13 @@ export default function FreightcomRatesWidget({ data }: any) {
     setPaymentMethodId(null)
     setMeta({ request_id: null, status: "idle" })
     setStep(1)
+  }
+
+  const startGetRates = () => {
+    resetRateFlow()
     ratesMutation.mutate({ offset: 0, openModalOnReady: true })
   }
 
-  // ✅ FIXED Next: prefer cached next page; otherwise fetch
   const goNextRatesPage = () => {
     if (!done) return
     const nextIndex = pageIndex + 1
@@ -285,9 +305,7 @@ export default function FreightcomRatesWidget({ data }: any) {
   const loadPaymentMethods = useMutation({
     mutationFn: async () => {
       if (!orderId) throw new Error("Missing orderId")
-      return sdk.client.fetch<PaymentMethodsResp>(
-        `/admin/orders/${orderId}/freightcom/payment-methods`
-      )
+      return sdk.client.fetch<PaymentMethodsResp>(`/admin/orders/${orderId}/freightcom/payment-methods`)
     },
     onSuccess: (r) => {
       setPaymentMethods(r.methods || [])
@@ -301,7 +319,7 @@ export default function FreightcomRatesWidget({ data }: any) {
       if (!selectedRate?.service_id) throw new Error("Select a rate")
       if (!paymentMethodId) throw new Error("Select a payment method")
 
-      return sdk.client.fetch(`/admin/orders/${orderId}/freightcom/shipments`, {
+      return sdk.client.fetch<BookShipmentResp>(`/admin/orders/${orderId}/freightcom/shipments`, {
         method: "POST",
         body: {
           service_id: selectedRate.service_id,
@@ -314,8 +332,55 @@ export default function FreightcomRatesWidget({ data }: any) {
             default_w_cm: defWCm,
             default_h_cm: defHCm,
           },
+          // optional helpers (saved to metadata)
+          carrier_name: selectedRate.carrier_name,
+          service_name: selectedRate.service_name,
+          quoted_total: selectedRate.total,
         },
       })
+    },
+    onSuccess: async (r) => {
+      const id = r?.shipment_id
+      if (!id) return
+      setShipmentId(id)
+
+      // prefer snapshot if backend returned it
+      if (r.shipment) setShipmentDetails(r.shipment)
+
+      // open shipment modal and fetch full details (fresh)
+      setIsShipmentModalOpen(true)
+      await fetchShipmentDetails.mutateAsync({ shipment_id: id })
+
+      // close rates flow
+      setIsRatesModalOpen(false)
+    },
+  })
+
+  const fetchShipmentDetails = useMutation({
+    mutationFn: async (vars: { shipment_id: string }) => {
+      if (!orderId) throw new Error("Missing orderId")
+      return sdk.client.fetch<any>(`/admin/orders/${orderId}/freightcom/shipments/${vars.shipment_id}`)
+    },
+    onSuccess: (resp) => {
+      const shipment = resp?.shipment ?? resp
+      setShipmentDetails(shipment)
+    },
+  })
+
+  const cancelShipment = useMutation({
+    mutationFn: async () => {
+      if (!orderId) throw new Error("Missing orderId")
+      if (!shipmentId) throw new Error("Missing shipmentId")
+      return sdk.client.fetch<any>(`/admin/orders/${orderId}/freightcom/shipments/${shipmentId}/cancel`, {
+        method: "POST",
+      })
+    },
+    onSuccess: () => {
+      // reset local UI for now
+      setShipmentDetails(null)
+      setShipmentId(null)
+      setIsShipmentModalOpen(false)
+      resetRateFlow()
     },
   })
 
@@ -324,6 +389,16 @@ export default function FreightcomRatesWidget({ data }: any) {
     await loadPaymentMethods.mutateAsync()
     setStep(2)
   }
+
+  const shipmentSummary = useMemo(() => {
+    const s = shipmentDetails
+    if (!s) return null
+    const tracking_url = s.tracking_url ?? null
+    const tracking_number =
+      s.primary_tracking_number ?? (Array.isArray(s.tracking_numbers) ? s.tracking_numbers?.[0] : null) ?? null
+    const label_url = pickLabelUrlFromShipment(s)
+    return { tracking_url, tracking_number, label_url, state: s.state, id: s.id }
+  }, [shipmentDetails])
 
   return (
     <Container className="divide-y p-0">
@@ -335,9 +410,7 @@ export default function FreightcomRatesWidget({ data }: any) {
           </Text>
           <div className="mt-2 flex items-center gap-2 flex-wrap">
             {headerBadge}
-            {requestId ? (
-              <Text size="small" className="text-ui-fg-subtle break-all">Request: {requestId}</Text>
-            ) : null}
+            {requestId ? <Text size="small" className="text-ui-fg-subtle break-all">Request: {requestId}</Text> : null}
             {meta.status_meta ? (
               <Text size="small" className="text-ui-fg-subtle">
                 {meta.status_meta.complete}/{meta.status_meta.total} complete
@@ -350,17 +423,27 @@ export default function FreightcomRatesWidget({ data }: any) {
           <Button onClick={startGetRates} disabled={!orderId || ratesMutation.isPending}>
             {ratesMutation.isPending ? "Working…" : "Get Rates"}
           </Button>
+
+          <Button
+            variant="secondary"
+            onClick={() => setIsShipmentModalOpen(true)}
+            disabled={!order?.metadata?.freightcom?.shipment_id && !shipmentId}
+          >
+            View Shipment
+          </Button>
         </div>
       </div>
 
       <div className="px-6 py-4 space-y-3">
-        {(ratesMutation.isError || loadPaymentMethods.isError || bookShipment.isError) && (
+        {(ratesMutation.isError || loadPaymentMethods.isError || bookShipment.isError || fetchShipmentDetails.isError || cancelShipment.isError) && (
           <Text size="small" className="text-ui-fg-error">
             {String(
               (ratesMutation.error as any)?.message ||
-                (loadPaymentMethods.error as any)?.message ||
-                (bookShipment.error as any)?.message ||
-                "Error"
+              (loadPaymentMethods.error as any)?.message ||
+              (bookShipment.error as any)?.message ||
+              (fetchShipmentDetails.error as any)?.message ||
+              (cancelShipment.error as any)?.message ||
+              "Error"
             )}
           </Text>
         )}
@@ -459,25 +542,19 @@ export default function FreightcomRatesWidget({ data }: any) {
         </div>
       </div>
 
-      {/* Full page modal */}
-      <FocusModal open={isModalOpen} onOpenChange={setIsModalOpen}>
+      {/* Rates modal */}
+      <FocusModal open={isRatesModalOpen} onOpenChange={setIsRatesModalOpen}>
         <FocusModal.Content className="h-[95vh] w-[95vw] max-w-none overflow-hidden">
           <FocusModal.Header>
             <div className="flex items-center justify-between w-full">
-              <Heading level="h2">
-                {step === 1 ? "Step 1 — Select Rate" : "Step 2 — Payment + Book"}
-              </Heading>
-
-              <div className="flex items-center gap-2">
-                <FocusModal.Close asChild>
-                  <Button size="small" variant="secondary">Close</Button>
-                </FocusModal.Close>
-              </div>
+              <Heading level="h2">{step === 1 ? "Step 1 — Select Rate" : "Step 2 — Payment + Book"}</Heading>
+              <FocusModal.Close asChild>
+                <Button size="small" variant="secondary">Close</Button>
+              </FocusModal.Close>
             </div>
           </FocusModal.Header>
 
           <FocusModal.Body className="p-6 overflow-y-auto h-[calc(95vh-64px)]">
-            {/* Stepper */}
             <div className="flex items-center gap-2 mb-4">
               <Badge size="small" color={step === 1 ? "blue" : "grey"}>1</Badge>
               <Text size="small" className={step === 1 ? "" : "text-ui-fg-subtle"}>Rate</Text>
@@ -486,7 +563,6 @@ export default function FreightcomRatesWidget({ data }: any) {
               <Text size="small" className={step === 2 ? "" : "text-ui-fg-subtle"}>Payment</Text>
             </div>
 
-            {/* Selected pinned */}
             <div className="mb-4 rounded-md border border-ui-border-base p-3">
               <Text size="small" className="text-ui-fg-subtle">Selected rate</Text>
               {selectedRate ? (
@@ -505,39 +581,21 @@ export default function FreightcomRatesWidget({ data }: any) {
               )}
             </div>
 
-            {/* STEP 1 */}
             {step === 1 && (
               <>
                 <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
-                  <div className="flex items-center gap-2">
-                    <Text size="small" className="text-ui-fg-subtle">
-                      Page {pageIndex + 1} / {Math.max(1, pages.length)} • Showing {currentRates.length} / {meta.rates_total ?? "?"}
-                    </Text>
-                  </div>
+                  <Text size="small" className="text-ui-fg-subtle">
+                    Page {pageIndex + 1} / {Math.max(1, pages.length)} • Showing {currentRates.length} / {meta.rates_total ?? "?"}
+                  </Text>
 
                   <div className="flex items-center gap-2">
-                    <Button
-                      size="small"
-                      variant="secondary"
-                      onClick={goPrevRatesPage}
-                      disabled={pageIndex === 0 || ratesMutation.isPending}
-                    >
+                    <Button size="small" variant="secondary" onClick={goPrevRatesPage} disabled={pageIndex === 0 || ratesMutation.isPending}>
                       Prev
                     </Button>
-                    <Button
-                      size="small"
-                      variant="secondary"
-                      onClick={goNextRatesPage}
-                      disabled={!done || ratesMutation.isPending}
-                    >
+                    <Button size="small" variant="secondary" onClick={goNextRatesPage} disabled={!done || ratesMutation.isPending}>
                       Next
                     </Button>
-
-                    <Button
-                      size="small"
-                      onClick={goToStep2}
-                      disabled={!selectedRate || loadPaymentMethods.isPending}
-                    >
+                    <Button size="small" onClick={goToStep2} disabled={!selectedRate || loadPaymentMethods.isPending}>
                       {loadPaymentMethods.isPending ? "Loading…" : "Continue"}
                     </Button>
                   </div>
@@ -558,9 +616,7 @@ export default function FreightcomRatesWidget({ data }: any) {
                           onClick={() => setSelectedServiceId(r.service_id)}
                           className={[
                             "text-left rounded-md border p-3 transition w-full",
-                            isSelected
-                              ? "border-ui-fg-base bg-ui-bg-base"
-                              : "border-ui-border-base hover:border-ui-fg-subtle",
+                            isSelected ? "border-ui-fg-base bg-ui-bg-base" : "border-ui-border-base hover:border-ui-fg-subtle",
                           ].join(" ")}
                         >
                           <div className="flex items-start justify-between gap-3">
@@ -570,11 +626,7 @@ export default function FreightcomRatesWidget({ data }: any) {
                               </Text>
                               <Text size="small" className="text-ui-fg-subtle break-all">{r.service_id}</Text>
                             </div>
-                            {r.paperless ? (
-                              <Badge size="small" color="green">Paperless</Badge>
-                            ) : (
-                              <Badge size="small" color="grey">Std</Badge>
-                            )}
+                            {r.paperless ? <Badge size="small" color="green">Paperless</Badge> : <Badge size="small" color="grey">Std</Badge>}
                           </div>
 
                           <div className="mt-2 grid grid-cols-2 gap-2">
@@ -599,25 +651,18 @@ export default function FreightcomRatesWidget({ data }: any) {
               </>
             )}
 
-            {/* STEP 2 */}
             {step === 2 && (
               <div className="space-y-4">
                 <div className="rounded-md border border-ui-border-base p-3">
                   <Text size="small" className="text-ui-fg-subtle">Payment method</Text>
 
                   {paymentMethods.length === 0 ? (
-                    <Text size="small" className="text-ui-fg-subtle mt-2">
-                      No payment methods returned.
-                    </Text>
+                    <Text size="small" className="text-ui-fg-subtle mt-2">No payment methods returned.</Text>
                   ) : (
                     <div className="mt-2 space-y-2">
                       {paymentMethods.map((m) => (
                         <label key={m.id} className="flex items-center gap-2 text-sm">
-                          <input
-                            type="radio"
-                            checked={paymentMethodId === m.id}
-                            onChange={() => setPaymentMethodId(m.id)}
-                          />
+                          <input type="radio" checked={paymentMethodId === m.id} onChange={() => setPaymentMethodId(m.id)} />
                           {m.label} <span className="text-ui-fg-subtle">({m.id})</span>
                         </label>
                       ))}
@@ -627,36 +672,114 @@ export default function FreightcomRatesWidget({ data }: any) {
 
                 <div className="rounded-md border border-ui-border-base p-3">
                   <Text size="small" className="text-ui-fg-subtle">Confirm expected ship date</Text>
-                  <Text size="small" className="mt-1">
-                    {shipDateISO} (sent as {JSON.stringify(toJsonDate(shipDateISO))})
+                  <Text size="small" className="mt-1">{shipDateISO}</Text>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Button variant="secondary" onClick={() => setStep(1)}>Back</Button>
+                  <Button onClick={() => bookShipment.mutate()} disabled={!selectedRate || !paymentMethodId || bookShipment.isPending}>
+                    {bookShipment.isPending ? "Booking…" : "Book Shipment"}
+                  </Button>
+                </div>
+              </div>
+            )}
+          </FocusModal.Body>
+        </FocusModal.Content>
+      </FocusModal>
+
+      {/* Shipment details modal */}
+      <FocusModal
+        open={isShipmentModalOpen}
+        onOpenChange={(o) => {
+          setIsShipmentModalOpen(o)
+          if (o) {
+            const id = shipmentId ?? order?.metadata?.freightcom?.shipment_id ?? null
+            if (id) {
+              setShipmentId(id)
+              fetchShipmentDetails.mutate({ shipment_id: id })
+            }
+          }
+        }}
+      >
+        <FocusModal.Content className="h-[95vh] w-[95vw] max-w-none overflow-hidden">
+          <FocusModal.Header>
+            <div className="flex items-center justify-between w-full">
+              <Heading level="h2">Shipment</Heading>
+              <FocusModal.Close asChild>
+                <Button size="small" variant="secondary">Close</Button>
+              </FocusModal.Close>
+            </div>
+          </FocusModal.Header>
+
+          <FocusModal.Body className="p-6 overflow-y-auto h-[calc(95vh-64px)]">
+            {!shipmentId ? (
+              <Text size="small" className="text-ui-fg-subtle">No shipment id found yet.</Text>
+            ) : fetchShipmentDetails.isPending ? (
+              <Text size="small" className="text-ui-fg-subtle">Loading shipment details…</Text>
+            ) : shipmentSummary ? (
+              <div className="space-y-3">
+                <div className="rounded-md border border-ui-border-base p-3">
+                  <Text size="small" className="text-ui-fg-subtle">Shipment ID</Text>
+                  <Text className="font-medium break-all">{shipmentSummary.id}</Text>
+                  <Text size="small" className="text-ui-fg-subtle">State: {shipmentSummary.state || "—"}</Text>
+                </div>
+
+                <div className="rounded-md border border-ui-border-base p-3">
+                  <Text size="small" className="text-ui-fg-subtle">Tracking</Text>
+                  <Text size="small">Tracking number: <span className="font-medium">{shipmentSummary.tracking_number || "—"}</span></Text>
+                  <Text size="small">
+                    Tracking URL:{" "}
+                    {shipmentSummary.tracking_url ? (
+                      <a className="underline" href={shipmentSummary.tracking_url} target="_blank" rel="noreferrer">
+                        Open tracking
+                      </a>
+                    ) : (
+                      "—"
+                    )}
+                  </Text>
+                </div>
+
+                <div className="rounded-md border border-ui-border-base p-3">
+                  <Text size="small" className="text-ui-fg-subtle">Label</Text>
+                  <Text size="small">
+                    Label URL:{" "}
+                    {shipmentSummary.label_url ? (
+                      <a className="underline" href={shipmentSummary.label_url} target="_blank" rel="noreferrer">
+                        Open label (PDF)
+                      </a>
+                    ) : (
+                      "—"
+                    )}
                   </Text>
                 </div>
 
                 <div className="flex items-center gap-2">
                   <Button
                     variant="secondary"
-                    onClick={() => setStep(1)}
+                    onClick={() => fetchShipmentDetails.mutate({ shipment_id: shipmentId })}
+                    disabled={fetchShipmentDetails.isPending}
                   >
-                    Back
+                    Refresh
                   </Button>
 
                   <Button
-                    onClick={() => bookShipment.mutate()}
-                    disabled={!selectedRate || !paymentMethodId || bookShipment.isPending}
+                    variant="danger"
+                    onClick={() => cancelShipment.mutate()}
+                    disabled={cancelShipment.isPending}
                   >
-                    {bookShipment.isPending ? "Booking…" : "Book Shipment"}
+                    {cancelShipment.isPending ? "Cancelling…" : "Cancel Shipment"}
                   </Button>
                 </div>
 
-                {bookShipment.isSuccess && (
-                  <div className="rounded-md border border-ui-border-base p-3">
-                    <Text className="font-medium">Shipment booked</Text>
-                    <Text size="small" className="text-ui-fg-subtle mt-1">
-                      Backend returned data (check logs / response).
-                    </Text>
-                  </div>
-                )}
+                <div className="rounded-md border border-ui-border-base p-3">
+                  <Text size="small" className="text-ui-fg-subtle">Raw shipment</Text>
+                  <pre className="text-xs mt-2 p-2 bg-ui-bg-subtle rounded overflow-auto max-h-96">
+{JSON.stringify(shipmentDetails, null, 2)}
+                  </pre>
+                </div>
               </div>
+            ) : (
+              <Text size="small" className="text-ui-fg-subtle">No shipment details returned.</Text>
             )}
           </FocusModal.Body>
         </FocusModal.Content>

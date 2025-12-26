@@ -1,5 +1,7 @@
 import type { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import type { Query } from "@medusajs/framework/types"
+import { Modules } from "@medusajs/framework/utils"
+import type { IOrderModuleService } from "@medusajs/framework/types"
 
 export const AUTHENTICATE = true
 
@@ -8,6 +10,7 @@ function requireEnv(name: string) {
   if (!v) throw new Error(`Missing env: ${name}`)
   return v
 }
+
 function normalizePhone(raw?: string | null) {
   const digits = String(raw || "").replace(/\D/g, "")
   return digits.length >= 10 ? digits.slice(-15) : null
@@ -22,6 +25,7 @@ function requireDestinationPhone(order: any) {
 
   return null
 }
+
 async function freightcomRequest(path: string, opts?: { method?: string; body?: any }) {
   const base = requireEnv("FREIGHTCOM_API_BASE_URL")
   const key = requireEnv("FREIGHTCOM_API_KEY")
@@ -29,13 +33,6 @@ async function freightcomRequest(path: string, opts?: { method?: string; body?: 
 
   const method = opts?.method || "GET"
   const body = opts?.body ? JSON.stringify(opts.body, null, 2) : undefined
-
-  console.log("📦 Freightcom REQUEST", {
-    url,
-    method,
-    headers: { "Content-Type": "application/json", Authorization: "[REDACTED]" },
-    body: opts?.body,
-  })
 
   const res = await fetch(url, {
     method,
@@ -52,15 +49,13 @@ async function freightcomRequest(path: string, opts?: { method?: string; body?: 
   }
 
   if (!res.ok) {
-    console.error("❌ Freightcom RESPONSE", { status: res.status, statusText: res.statusText, body: json ?? text })
     throw new Error(`Freightcom ${res.status}: ${JSON.stringify(json ?? { raw: text })}`)
   }
 
-  console.log("✅ Freightcom RESPONSE", json ?? text)
   return json ?? { raw: text }
 }
 
-// --- package builder (same defaults) ---
+// --- package builder (unchanged) ---
 type PackageOverrides = {
   unit_system?: "metric" | "imperial"
   default_weight_g?: number
@@ -147,6 +142,19 @@ function buildPackages(order: any, overrides?: PackageOverrides) {
       ]
 }
 
+function pickShipmentId(created: any): string | null {
+  return created?.id ?? created?.shipment_id ?? null
+}
+
+function extractLabelUrlFromShipment(shipment: any): string | null {
+  const labels = shipment?.labels
+  if (Array.isArray(labels) && labels.length) {
+    const first = labels[0]
+    return first?.url || null
+  }
+  return shipment?.label_url || null
+}
+
 export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
   try {
     const orderId = req.params.id
@@ -158,14 +166,10 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
       package_overrides,
       unique_id,
       customs_and_duties_payment_method_id,
-    } = (req.body || {}) as {
-      service_id: string
-      payment_method_id: string
-      customs_and_duties_payment_method_id?: string
-      expected_ship_date: { year: number; month: number; day: number }
-      package_overrides?: PackageOverrides
-      unique_id?: string
-    }
+      carrier_name,
+      service_name,
+      quoted_total,
+    } = (req.body || {}) as any
 
     if (!service_id) return res.status(400).json({ message: "Missing service_id" })
     if (!payment_method_id) return res.status(400).json({ message: "Missing payment_method_id" })
@@ -174,44 +178,46 @@ export const POST = async (req: MedusaRequest, res: MedusaResponse) => {
     const query = req.scope.resolve<Query>("query")
     const { data } = await query.graph({
       entity: "order",
-fields: [
-  "id",
-  "email",
+      fields: [
+        "id",
+        "email",
+        "metadata",
 
-  "customer.phone",
+        "customer.phone",
 
-  "shipping_address.phone",
-  "shipping_address.first_name",
-  "shipping_address.last_name",
-  "shipping_address.address_1",
-  "shipping_address.address_2",
-  "shipping_address.city",
-  "shipping_address.province",
-  "shipping_address.country_code",
-  "shipping_address.postal_code",
-  "shipping_address.company",
+        "shipping_address.phone",
+        "shipping_address.first_name",
+        "shipping_address.last_name",
+        "shipping_address.address_1",
+        "shipping_address.address_2",
+        "shipping_address.city",
+        "shipping_address.province",
+        "shipping_address.country_code",
+        "shipping_address.postal_code",
+        "shipping_address.company",
 
-  "items.title",
-  "items.quantity",
-  "items.variant.weight",
-  "items.variant.length",
-  "items.variant.width",
-  "items.variant.height",
-],
+        "items.title",
+        "items.quantity",
+        "items.variant.weight",
+        "items.variant.length",
+        "items.variant.width",
+        "items.variant.height",
+      ],
       filters: { id: orderId },
     })
 
     const order = data?.[0]
     if (!order) return res.status(404).json({ message: "Order not found" })
-const destinationPhone = requireDestinationPhone(order)
 
-if (!destinationPhone) {
-  return res.status(400).json({
-    message:
-      "Customer phone number is required to book shipment. Please add a phone number to the customer or shipping address.",
-    code: "DESTINATION_PHONE_REQUIRED",
-  })
-}
+    const destinationPhone = requireDestinationPhone(order)
+    if (!destinationPhone) {
+      return res.status(400).json({
+        message:
+          "Customer phone number is required to book shipment. Please add a phone number to the customer or shipping address.",
+        code: "DESTINATION_PHONE_REQUIRED",
+      })
+    }
+
     const ship = order.shipping_address
     if (!ship?.postal_code || !ship?.country_code) {
       return res.status(400).json({ message: "Order shipping address missing postal code / country." })
@@ -228,34 +234,30 @@ if (!destinationPhone) {
         country: "CA",
         postal_code: "B0N2T0",
       },
-        phone_number:{
-            number:"9023064110"
-        },
-                contact_name:"Bioteem Warehouse",
+      phone_number: { number: normalizePhone(process.env.WAREHOUSE_PHONE) || "9023064110" },
+      contact_name: process.env.WAREHOUSE_CONTACT_NAME || "Bioteem Warehouse",
       residential: true,
       email_addresses: [process.env.WAREHOUSE_EMAIL || "sales@bioteem40.ca"],
       receives_email_updates: true,
     }
 
-const destination = {
-  name: `${ship.first_name || ""} ${ship.last_name || ""}`.trim() || "Customer",
-  address: {
-    address_line_1: ship.address_1 || "",
-    address_line_2: ship.address_2 || "",
-    unit_number: ship.company || "",
-    city: ship.city || "",
-    region: ship.province || "",
-    country: (ship.country_code || "").toUpperCase(),
-    postal_code: ship.postal_code || "",
-  },
-  phone_number: {
-    number: destinationPhone,
-  },
-  contact_name: `${ship.first_name || ""} ${ship.last_name || ""}`.trim() || "Customer",
-  residential: true,
-  email_addresses: order.email ? [order.email] : [],
-  receives_email_updates: true,
-}
+    const destination = {
+      name: `${ship.first_name || ""} ${ship.last_name || ""}`.trim() || "Customer",
+      address: {
+        address_line_1: ship.address_1 || "",
+        address_line_2: ship.address_2 || "",
+        unit_number: ship.company || "",
+        city: ship.city || "",
+        region: ship.province || "",
+        country: (ship.country_code || "").toUpperCase(),
+        postal_code: ship.postal_code || "",
+      },
+      phone_number: { number: destinationPhone },
+      contact_name: `${ship.first_name || ""} ${ship.last_name || ""}`.trim() || "Customer",
+      residential: true,
+      email_addresses: order.email ? [order.email] : [],
+      receives_email_updates: true,
+    }
 
     const packages = buildPackages(order, package_overrides)
 
@@ -273,10 +275,56 @@ const destination = {
       },
     }
 
-    const path = process.env.FREIGHTCOM_BOOK_PATH || "/shipment"
-    const booked = await freightcomRequest(path, { method: "POST", body: bookBody })
+    // ✅ POST /shipment returns: { id, previously_created }
+    const created = await freightcomRequest("/shipment", { method: "POST", body: bookBody })
+    const shipment_id = pickShipmentId(created)
 
-    return res.status(200).json({ booked })
+    if (!shipment_id) {
+      return res.status(502).json({
+        message: "Freightcom did not return shipment id",
+        raw: created,
+      })
+    }
+
+    // ✅ Now fetch full shipment to get tracking + labels
+    const shipmentResp = await freightcomRequest(`/shipment/${shipment_id}`, { method: "GET" })
+    const shipment = shipmentResp?.shipment ?? shipmentResp
+    const tracking_url = shipment?.tracking_url ?? null
+    const tracking_number =
+      shipment?.primary_tracking_number ??
+      (Array.isArray(shipment?.tracking_numbers) ? shipment.tracking_numbers?.[0] : null) ??
+      null
+    const label_url = extractLabelUrlFromShipment(shipment)
+
+    // ✅ Save to order metadata (as you requested)
+    const prevMeta = (order.metadata || {}) as Record<string, any>
+    const nextMeta = {
+      ...prevMeta,
+      freightcom: {
+        ...(prevMeta.freightcom || {}),
+        booked_at: new Date().toISOString(),
+        shipment_id,
+        tracking_url,
+        tracking_number,
+        label_url,
+        service_id,
+        carrier_name: carrier_name ?? null,
+        service_name: service_name ?? null,
+        quoted_total: quoted_total ?? null,
+      },
+    }
+
+    const orderModule = req.scope.resolve<IOrderModuleService>(Modules.ORDER)
+    await orderModule.updateOrders(orderId, { metadata: nextMeta })
+
+    return res.status(200).json({
+      shipment_id,
+      previously_created: Boolean(created?.previously_created),
+      shipment, // full snapshot (useful for UI)
+      tracking_url,
+      tracking_number,
+      label_url,
+    })
   } catch (e: any) {
     return res.status(500).json({ message: e?.message || "Unknown error" })
   }
