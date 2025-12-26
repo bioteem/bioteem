@@ -20,8 +20,7 @@ function getOrderFromWidgetData(data: any) {
 export default function FreightcomTrackingUpdatesWidget({ data }: any) {
   const order = getOrderFromWidgetData(data)
   const orderId = order?.id
-  const shipmentId = order?.metadata?.freightcom?.shipment_id as string | undefined
-
+  const shipmentId = order?.metadata?.freightcom_shipment_id as string | undefined
   const [events, setEvents] = useState<TrackingEvent[]>([])
 
   const fetchEvents = useMutation({
