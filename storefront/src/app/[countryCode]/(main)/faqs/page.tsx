@@ -20,6 +20,7 @@ const ProductQuality = [
 ]
 
 const Shipping = [
+  {q:"When does my product ship?", a:"All powdered products ship within 2–5 business days. Liquid products are shipped Monday through Thursday, depending on your location, to ensure product quality. If liquid shipping isn’t ideal for your area, powdered versions are available for all of our liquid formulas"},
   {
     q: "How long does the product take to ship to me? Is the product safe upon arrival?",
     a: "Within certain geographical areas, we offer next-day shipping (24 hours), though some transit times may be longer. All liquid shipments are refrigerated using high-quality, recyclable paper insulation with frozen gel packs. Upon delivery, liquid products should be cool to the touch, not warm. If a product does not arrive cool, we will issue a replacement shipment. Please see our shipping policy for more details."
