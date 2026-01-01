@@ -13,6 +13,7 @@ import ProductActionsWrapper from "./product-actions-wrapper"
 import TripleInfoSection from "../components/product-detail"
 import { HttpTypes } from "@medusajs/types"
 import type { SubscriptionPlan } from "@lib/data/products" 
+import ProductReviews from "../components/product-reviews"
 
 import ProductFaq from "../components/product-faqs"
 type ProductTemplateProps = {
@@ -78,6 +79,9 @@ const ProductTemplate: React.FC<ProductTemplateProps> = ({
         className="content-container my-16 small:my-32"
         data-testid="related-products-container"
       >
+        <div className="content-container my-16 small:my-32">
+  <ProductReviews productId={product.id} />
+</div>
         <Suspense fallback={<SkeletonRelatedProducts />}>
           <RelatedProducts product={product} countryCode={countryCode} />
         </Suspense>

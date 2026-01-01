@@ -71,6 +71,9 @@ importers:
       awilix:
         specifier: ^8.0.1
         version: 8.0.1
+      knex:
+        specifier: link:@medusajs/framework/mikro-orm/knex
+        version: link:@medusajs/framework/mikro-orm/knex
       medusajs-launch-utils:
         specifier: 0.0.18
         version: 0.0.18

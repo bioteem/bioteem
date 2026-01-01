@@ -4,6 +4,8 @@ import { cache } from "react"
 import { getRegion } from "./regions"
 import { SortOptions } from "@modules/store/components/refinement-list/sort-products"
 import { sortProducts } from "@lib/util/sort-products"
+import { headers as nextHeaders } from "next/headers"
+import { StoreProductReview } from "../../types/global"
 
 export const getProductsById = cache(async function ({
   ids,
@@ -178,3 +180,75 @@ export const getSubscriptionPlansForProduct = cache(async function (
     return []
   }
 })
+export const getProductReviews = cache(async function ({
+  productId,
+  limit = 10,
+  offset = 0,
+}: {
+  productId: string
+  limit?: number
+  offset?: number
+}) {
+  const headers = await getAuthHeaders()
+
+  return sdk.client.fetch<{
+    reviews: StoreProductReview[]
+    average_rating: number
+    limit: number
+    offset: number
+    count: number
+  }>(`/store/products/${productId}/reviews`, {
+    headers,
+    query: {
+      limit,
+      offset,
+      order: "-created_at",
+    },
+    next: await getCacheOptions(`product-reviews-${productId}`),
+    cache: "force-cache",
+  })
+})
+
+export const addProductReview = async (input: {
+  title?: string
+  content: string
+  first_name: string
+  last_name: string
+  rating: number
+  product_id: string
+}) => {
+  const headers = await getAuthHeaders()
+
+  return sdk.client.fetch(`/store/reviews`, {
+    method: "POST",
+    headers,
+    body: input,
+    // mutation => no-store
+    cache: "no-store",
+  })
+}
+
+/**
+ * Forward cookies/authorization from the incoming request to Medusa
+ * so customer-authenticated endpoints work in Server Components / Route Handlers.
+ */
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  const h = nextHeaders()
+
+  const cookie = h.get("cookie")
+  const authorization = h.get("authorization")
+
+  const out: Record<string, string> = {}
+  if (cookie) out.cookie = cookie
+  if (authorization) out.authorization = authorization
+
+  return out
+}
+
+/**
+ * Next.js cache tags for this request.
+ * (Lets you later do revalidateTag(`product-reviews-${productId}`) after submission if needed.)
+ */
+async function getCacheOptions(tag: string): Promise<{ tags: string[] }> {
+  return { tags: [tag] }
+}
