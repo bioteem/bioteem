@@ -20,19 +20,27 @@ export const GET = async (
   const reviewModuleService: ProductReviewModuleService = req.scope.resolve(PRODUCT_REVIEW_MODULE)
 
   // Get reviews for product
-  const { data: reviews, metadata: {
-    count,
-    take,
-    skip,
-  } = { count: 0, take: 10, skip: 0 } } = await query.graph({
-    entity: "review",
-    filters: {
-      product_id: id,
-      status: "approved",
-    },
-    ...req.queryConfig,
-  })
-
+const {
+  data: reviews,
+  metadata: { count, take, skip } = { count: 0, take: 10, skip: 0 },
+} = await query.graph({
+  entity: "review",
+  filters: {
+    product_id: id,
+    status: "approved",
+  },
+  ...req.queryConfig, // keep pagination/order
+  fields: [
+    "id",
+    "rating",
+    "title",
+    "first_name",
+    "last_name",
+    "content",
+    "created_at",
+    // IMPORTANT: no "product.*"
+  ],
+})
   res.json({
     reviews,
     count,
