@@ -69,7 +69,7 @@ const ProductTemplate: React.FC<ProductTemplateProps> = ({
       product ={product}
     />
 
-     <div className="mt-10 max-w-3xl">
+<div className="content-container py-12">
             <h1>FAQs</h1>
                 <ProductFaq product={product} />
           </div>
