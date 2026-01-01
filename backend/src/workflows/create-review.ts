@@ -25,7 +25,7 @@ export const createReviewWorkflow: ReturnType<typeof createWorkflow> =
       entity: "product",
       fields: ["id"],
       filters: {
-        id: input.product_id,
+        id: [input.product_id],
       },
       options: {
         throwIfKeyNotFound: true,
