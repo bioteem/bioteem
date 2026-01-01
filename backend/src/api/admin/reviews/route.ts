@@ -4,7 +4,7 @@ import {
 } from "@medusajs/framework/http"
 import { createFindParams } from "@medusajs/medusa/api/utils/validators"
 
-export const GetAdminReviewsSchema = createFindParams()
+export const GetAdminReviewsSchema: ReturnType<typeof createFindParams> = createFindParams()
 
 export const GET = async (
   req: MedusaRequest,

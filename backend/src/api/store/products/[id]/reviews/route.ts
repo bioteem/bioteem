@@ -7,7 +7,8 @@ import { PRODUCT_REVIEW_MODULE } from "../../../../../modules/product-review"
 import ProductReviewModuleService from "../../../../../modules/product-review/service"
 import { createFindParams } from "@medusajs/medusa/api/utils/validators"
 
-export const GetStoreReviewsSchema = createFindParams()
+export const GetStoreReviewsSchema: ReturnType<typeof createFindParams> =
+  createFindParams()
 
 export const GET = async (
   req: MedusaRequest,

@@ -60,7 +60,7 @@ export default defineMiddlewares({
     },
     {
       matcher: "/store/products/:id/reviews",
-      methods: ["GET"],
+      method: ["GET"],
       middlewares: [
         validateAndTransformQuery(GetStoreReviewsSchema, {
           isList: true,
