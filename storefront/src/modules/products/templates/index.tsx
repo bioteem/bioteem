@@ -68,7 +68,12 @@ const ProductTemplate: React.FC<ProductTemplateProps> = ({
       <TripleInfoSection
       product ={product}
     />
-    <ProductFaq product={product} />
+
+     <div className="mt-10 max-w-3xl">
+            <h1>FAQs</h1>
+                <ProductFaq product={product} />
+          </div>
+
       <div
         className="content-container my-16 small:my-32"
         data-testid="related-products-container"
