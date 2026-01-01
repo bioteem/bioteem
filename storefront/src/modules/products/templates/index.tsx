@@ -13,6 +13,8 @@ import ProductActionsWrapper from "./product-actions-wrapper"
 import TripleInfoSection from "../components/product-detail"
 import { HttpTypes } from "@medusajs/types"
 import type { SubscriptionPlan } from "@lib/data/products" 
+
+import ProductFaq from "../components/product-faqs"
 type ProductTemplateProps = {
   product: HttpTypes.StoreProduct
   region: HttpTypes.StoreRegion
@@ -38,8 +40,8 @@ const ProductTemplate: React.FC<ProductTemplateProps> = ({
         data-testid="product-container"
       >
         <div className="flex flex-col small:sticky small:top-48 small:py-0 small:max-w-[300px] w-full py-8 gap-y-6">
-          {/* <ProductInfo product={product} />
-          <ProductTabs product={product} /> */}
+         <ProductInfo product={product} />
+          {/* <ProductTabs product={product} /> */}
           <ProductIngredients product={product} />
         </div>
         <div className="block w-full relative">
@@ -66,6 +68,7 @@ const ProductTemplate: React.FC<ProductTemplateProps> = ({
       <TripleInfoSection
       product ={product}
     />
+    <ProductFaq product={product} />
       <div
         className="content-container my-16 small:my-32"
         data-testid="related-products-container"
