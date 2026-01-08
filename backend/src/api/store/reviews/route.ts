@@ -25,19 +25,16 @@ export const PostStoreReviewSchema = z.object({
 
 type PostStoreReviewReq = z.infer<typeof PostStoreReviewSchema>
 
-export const POST = async (
-  req: AuthenticatedMedusaRequest<PostStoreReviewReq>,
-  res: MedusaResponse
-) => {
-  const input = req.validatedBody
-
-  const { result } = await createReviewWorkflow(req.scope)
-    .run({
-      input: {
-        ...input,
-        customer_id: req.auth_context?.actor_id,
-      },
+export const POST = async (req, res) => {
+  try {
+    const input = req.validatedBody
+    const { result } = await createReviewWorkflow(req.scope).run({
+      input: { ...input, customer_id: req.auth_context?.actor_id },
     })
-
-  res.json(result)
+    res.json(result)
+  } catch (e: any) {
+    res.status(400).json({
+      message: e?.message ?? "Bad Request",
+    })
+  }
 }
