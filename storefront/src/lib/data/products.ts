@@ -189,21 +189,25 @@ export const getProductReviews = async ({
   limit?: number
   offset?: number
 }) => {
-  return sdk.client.fetch<{
-    reviews: StoreProductReview[]
-    average_rating: number
-    limit: number
-    offset: number
-    count: number
-  }>(`/store/products/${productId}/reviews`, {
-    query: {
-      limit,
-      offset,
-      order: "-created_at",
-    },
-    // Pages router: don’t use Next "next"/"force-cache" options here
-    cache: "no-store",
-  })
+  const backend = process.env.NEXT_PUBLIC_MEDUSA_BACKEND_URL!
+  const publishableKey =
+    process.env.NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY!
+
+  const res = await fetch(
+    `${backend}/store/products/${productId}/reviews?limit=${limit}&offset=${offset}`,
+    {
+      headers: {
+        "x-publishable-api-key": publishableKey,
+      },
+      cache: "no-store",
+    }
+  )
+
+  if (!res.ok) {
+    throw new Error(await res.text())
+  }
+
+  return res.json()
 }
 
 export const addProductReview = async (input: {
@@ -214,19 +218,19 @@ export const addProductReview = async (input: {
   rating: number
   product_id: string
 }) => {
-  const base =
-    process.env.NEXT_PUBLIC_MEDUSA_BACKEND_URL ||
-    process.env.NEXT_PUBLIC_MEDUSA_BACKEND ||
-    ""
+  const backend =
+    process.env.NEXT_PUBLIC_MEDUSA_BACKEND_URL!
 
-  if (!base) {
-    throw new Error("NEXT_PUBLIC_MEDUSA_BACKEND_URL is not set")
-  }
+  const publishableKey =
+    process.env.NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY!
 
-  const res = await fetch(`${base}/store/reviews`, {
+  const res = await fetch(`${backend}/store/reviews`, {
     method: "POST",
-    credentials: "include", // ✅ sends customer session cookie
-    headers: { "content-type": "application/json" },
+    credentials: "include", // needed if you keep customer auth
+    headers: {
+      "content-type": "application/json",
+      "x-publishable-api-key": publishableKey, // ✅ REQUIRED
+    },
     body: JSON.stringify(input),
   })
 

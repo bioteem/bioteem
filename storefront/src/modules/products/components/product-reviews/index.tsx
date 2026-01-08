@@ -28,7 +28,7 @@ export default function ProductReviews({
     }).then(({ reviews: paginatedReviews, average_rating, count, limit }) => {
       setReviews((prev) => {
         const newReviews = paginatedReviews.filter(
-          (review) => !prev.some((r) => r.id === review.id)
+          (review: { id: string }) => !prev.some((r) => r.id === review.id)
         )
         return [...prev, ...newReviews]
       })
