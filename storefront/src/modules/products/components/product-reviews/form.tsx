@@ -5,7 +5,7 @@ import { useState } from "react"
 import { useEffect } from "react"
 import { getCustomer } from "../../../../lib/data/customer"
 import { HttpTypes } from "@medusajs/types"
-import { Button, Input, Label, Textarea, toast, Toaster } from "@medusajs/ui"
+import { Button, Input, Label, Textarea, toast } from "@medusajs/ui"
 import { Star, StarSolid } from "@medusajs/icons"
 import { addProductReview } from "../../../../lib/data/products"
 
@@ -34,12 +34,12 @@ export default function ProductReviewsForm({ productId }: ProductReviewsFormProp
   }
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
-    if (!content || !rating) {
-      toast.error("Error", {
-        description: "Please fill in required fields.",
-      })
-      return
-    }
+e.preventDefault()
+
+if (!content || !rating) {
+  toast.error("Error", { description: "Please fill in required fields." })
+  return
+}
 
     e.preventDefault()
     setIsLoading(true)
@@ -108,7 +108,7 @@ return (
         </div>
       </div>
     )}
-    <Toaster />
+
   </div>
 )
 }

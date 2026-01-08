@@ -214,9 +214,25 @@ export const addProductReview = async (input: {
   rating: number
   product_id: string
 }) => {
-  return sdk.client.fetch(`/store/reviews`, {
+  const base =
+    process.env.NEXT_PUBLIC_MEDUSA_BACKEND_URL ||
+    process.env.NEXT_PUBLIC_MEDUSA_BACKEND ||
+    ""
+
+  if (!base) {
+    throw new Error("NEXT_PUBLIC_MEDUSA_BACKEND_URL is not set")
+  }
+
+  const res = await fetch(`${base}/store/reviews`, {
     method: "POST",
-    body: input,
-    cache: "no-store",
+    credentials: "include", // ✅ sends customer session cookie
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
   })
+
+  if (!res.ok) {
+    throw new Error(await res.text())
+  }
+
+  return res.json()
 }
